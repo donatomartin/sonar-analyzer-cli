@@ -3,7 +3,6 @@ package com.donatomartin.sonarcli.analyzers.js.catalog;
 import com.donatomartin.sonarcli.analyzers.js.model.CssRuntimeRule;
 import com.donatomartin.sonarcli.analyzers.js.model.JsRuleEntry;
 import com.donatomartin.sonarcli.analyzers.js.model.JsRuntimeRule;
-import com.donatomartin.sonarcli.core.catalog.RuleCatalog;
 import com.donatomartin.sonarcli.core.model.RuleDefinition;
 import com.donatomartin.sonarcli.core.model.RuleFamily;
 import com.donatomartin.sonarcli.core.util.JsonSupport;
@@ -49,12 +48,6 @@ public final class JsRuleCatalogLoader {
     jsRules.values().stream().sorted(Comparator.comparing(MutableJsRule::rawKey)).forEach(rule -> rawRules.add(rule.toEntry()));
     cssRules.values().stream().sorted(Comparator.comparing(MutableCssRule::rawKey)).forEach(rule -> rawRules.add(rule.toEntry()));
 
-    var collisions = rawRules.stream().collect(
-      LinkedHashMap<String, Integer>::new,
-      (map, rule) -> map.merge(rule.definition().rawKey(), 1, Integer::sum),
-      Map::putAll
-    );
-
     return rawRules.stream().map(entry -> {
       var definition = entry.definition();
       return new JsRuleEntry(
@@ -62,11 +55,7 @@ public final class JsRuleCatalogLoader {
           "js",
           definition.family(),
           definition.rawKey(),
-          RuleCatalog.selectorFor(
-            definition.family(),
-            definition.rawKey(),
-            collisions.getOrDefault(definition.rawKey(), 0) > 1
-          ),
+          definition.rawKey(),
           definition.title(),
           definition.descriptionHtml(),
           definition.type(),

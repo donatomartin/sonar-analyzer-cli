@@ -38,6 +38,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.stream.Stream;
 import org.sonar.api.SonarEdition;
 import org.sonar.api.SonarProduct;
 import org.sonar.api.SonarQubeSide;
@@ -88,7 +89,7 @@ import org.sonar.java.GeneratedCheckList;
 import org.sonar.java.JavaFrontend;
 import org.sonar.java.Measurer;
 import org.sonar.java.SonarComponents;
-import org.sonar.java.classpath.ClasspathForMainForSonarLint;
+import org.sonar.java.classpath.ClasspathForMain;
 import org.sonar.java.classpath.ClasspathForTest;
 import org.sonar.java.filters.PostAnalysisIssueFilter;
 import org.sonar.java.model.JavaVersionImpl;
@@ -100,6 +101,15 @@ import org.sonarsource.sonarlint.plugin.api.SonarLintRuntime;
 public final class JavaAnalyzerRuntime {
 
   public static final String ANALYZER_VERSION = "8.20.0.40630";
+  private static final List<String> MAIN_BINARY_SUFFIXES = List.of(
+    "target/classes",
+    "build/classes/java/main"
+  );
+  private static final List<String> TEST_BINARY_SUFFIXES = List.of(
+    "target/test-classes",
+    "build/classes/java/test"
+  );
+  private static final Set<String> LIBRARY_DIRECTORY_NAMES = Set.of("dependency", "dependencies", "lib", "libs");
 
   public AnalyzerResult analyzeProject(DiscoveredProject project, List<JavaRuleEntry> selectedRules, AnalysisParameters parameters)
     throws IOException {
@@ -116,17 +126,30 @@ public final class JavaAnalyzerRuntime {
   }
 
   public List<String> doctor(DiscoveredProject project, AnalysisParameters parameters) {
+    var resolution = resolveInputs(project, parameters);
     var lines = new ArrayList<String>();
     lines.add("Analyzer version: " + ANALYZER_VERSION);
     lines.add("Java runtime: " + Runtime.version());
     lines.add("Detected java files: " + project.filesOfKind(FileKind.JAVA).size());
-    lines.add("Configured sonar.java.binaries: " + parameters.javaBinaries().size());
-    lines.add("Configured sonar.java.libraries: " + parameters.javaLibraries().size());
-    lines.add("Configured sonar.java.test.binaries: " + parameters.javaTestBinaries().size());
-    lines.add("Configured sonar.java.test.libraries: " + parameters.javaTestLibraries().size());
+    addPathSummary(lines, project.baseDir(), "Configured sonar.java.binaries", parameters.javaBinaries());
+    addPathSummary(lines, project.baseDir(), "Resolved sonar.java.binaries", resolution.mainBinaries());
+    addPathSummary(lines, project.baseDir(), "Configured sonar.java.libraries", parameters.javaLibraries());
+    addPathSummary(lines, project.baseDir(), "Resolved sonar.java.libraries", resolution.mainLibraries());
+    addPathSummary(lines, project.baseDir(), "Configured sonar.java.test.binaries", parameters.javaTestBinaries());
+    addPathSummary(lines, project.baseDir(), "Resolved sonar.java.test.binaries", resolution.testBinaries());
+    addPathSummary(lines, project.baseDir(), "Configured sonar.java.test.libraries", parameters.javaTestLibraries());
+    addPathSummary(lines, project.baseDir(), "Resolved sonar.java.test.libraries", resolution.testLibraries());
     lines.add("Configured sonar.java.source: " + (parameters.javaSourceVersion() == null ? "<auto>" : parameters.javaSourceVersion()));
     if (parameters.javaJdkHome() != null) {
       lines.add("Configured sonar.java.jdkHome: " + parameters.javaJdkHome());
+    }
+    if (!resolution.doctorWarnings().isEmpty()) {
+      lines.add("Warnings:");
+      resolution.doctorWarnings().forEach(warning -> lines.add("  - " + warning));
+    }
+    if (!resolution.remediationHints().isEmpty()) {
+      lines.add("How to fix it:");
+      resolution.remediationHints().forEach(hint -> lines.add("  - " + hint));
     }
     return List.copyOf(lines);
   }
@@ -145,12 +168,19 @@ public final class JavaAnalyzerRuntime {
     for (ScannedFile file : javaFiles) {
       inputs.add(new SimpleInputFile(project.baseDir(), file));
     }
+    var resolvedInputs = resolveInputs(project, parameters);
     var fileSystem = new SimpleFileSystem(project.baseDir(), inputs);
-    var configuration = new MapBackedConfiguration(buildConfiguration(parameters));
+    var configuration = new MapBackedConfiguration(buildConfiguration(parameters, resolvedInputs));
     var activeRules = new SimpleActiveRules(selectedRules);
     var sensorContext = new SimpleSensorContext(configuration, fileSystem, activeRules, project.baseDir());
+    var capturedWarnings = new ArrayList<String>();
+    AnalysisWarnings analysisWarnings = warning -> {
+      if (!capturedWarnings.contains(warning)) {
+        capturedWarnings.add(warning);
+      }
+    };
 
-    var classpathForMain = new ClasspathForMainForSonarLint(configuration, fileSystem);
+    var classpathForMain = new CapturingClasspathForMain(configuration, fileSystem, new AnalysisWarningsWrapper(analysisWarnings));
     var classpathForTest = new ClasspathForTest(configuration, fileSystem);
     var sonarComponents = new SonarComponents(
       new NoOpFileLinesContextFactory(),
@@ -198,6 +228,8 @@ public final class JavaAnalyzerRuntime {
       inputs.stream().filter(input -> input.type() == InputFile.Type.TEST).map(input -> (InputFile) input).toList(),
       List.of()
     );
+    classpathForMain.logSuspiciousEmptyLibraries();
+    classpathForTest.logSuspiciousEmptyLibraries();
 
     var rulesByKey = selectedRules.stream().collect(
       LinkedHashMap<String, RuleDefinition>::new,
@@ -209,6 +241,8 @@ public final class JavaAnalyzerRuntime {
       .sorted(Comparator.comparing(IssueRecord::path).thenComparingInt(IssueRecord::startLine))
       .toList();
     var warnings = new ArrayList<String>();
+    warnings.addAll(resolvedInputs.analysisWarnings());
+    warnings.addAll(capturedWarnings);
     warnings.addAll(sensorContext.analysisErrors());
     return new AnalyzerResult("java", ANALYZER_VERSION, List.copyOf(warnings), issues, warnings.size(), javaFileCounts(javaFiles));
   }
@@ -250,19 +284,19 @@ public final class JavaAnalyzerRuntime {
     }
   }
 
-  private static Map<String, String> buildConfiguration(AnalysisParameters parameters) {
+  private static Map<String, String> buildConfiguration(AnalysisParameters parameters, ResolvedJavaInputs resolvedInputs) {
     var values = new LinkedHashMap<String, String>();
-    if (!parameters.javaBinaries().isEmpty()) {
-      values.put("sonar.java.binaries", joinPaths(parameters.javaBinaries()));
+    if (!resolvedInputs.mainBinaries().isEmpty()) {
+      values.put("sonar.java.binaries", joinPaths(resolvedInputs.mainBinaries()));
     }
-    if (!parameters.javaLibraries().isEmpty()) {
-      values.put("sonar.java.libraries", joinPaths(parameters.javaLibraries()));
+    if (!resolvedInputs.mainLibraries().isEmpty()) {
+      values.put("sonar.java.libraries", joinPaths(resolvedInputs.mainLibraries()));
     }
-    if (!parameters.javaTestBinaries().isEmpty()) {
-      values.put("sonar.java.test.binaries", joinPaths(parameters.javaTestBinaries()));
+    if (!resolvedInputs.testBinaries().isEmpty()) {
+      values.put("sonar.java.test.binaries", joinPaths(resolvedInputs.testBinaries()));
     }
-    if (!parameters.javaTestLibraries().isEmpty()) {
-      values.put("sonar.java.test.libraries", joinPaths(parameters.javaTestLibraries()));
+    if (!resolvedInputs.testLibraries().isEmpty()) {
+      values.put("sonar.java.test.libraries", joinPaths(resolvedInputs.testLibraries()));
     }
     if (parameters.javaJdkHome() != null) {
       values.put("sonar.java.jdkHome", parameters.javaJdkHome().toAbsolutePath().normalize().toString());
@@ -281,6 +315,145 @@ public final class JavaAnalyzerRuntime {
     return paths.stream().map(path -> path.toAbsolutePath().normalize().toString()).reduce((left, right) -> left + "," + right).orElse("");
   }
 
+  private static void addPathSummary(List<String> lines, Path baseDir, String label, List<Path> paths) {
+    lines.add(label + ": " + paths.size());
+    for (Path path : paths.stream().limit(5).toList()) {
+      lines.add("  - " + relativePath(baseDir, path));
+    }
+    if (paths.size() > 5) {
+      lines.add("  - ...");
+    }
+  }
+
+  private static ResolvedJavaInputs resolveInputs(DiscoveredProject project, AnalysisParameters parameters) {
+    var mainBinaries = parameters.javaBinaries().isEmpty()
+      ? discoverDirectories(project.baseDir(), MAIN_BINARY_SUFFIXES, JavaAnalyzerRuntime::containsClassFiles)
+      : parameters.javaBinaries();
+    var testBinaries = parameters.javaTestBinaries().isEmpty()
+      ? discoverDirectories(project.baseDir(), TEST_BINARY_SUFFIXES, JavaAnalyzerRuntime::containsClassFiles)
+      : parameters.javaTestBinaries();
+    var mainLibraries = parameters.javaLibraries().isEmpty()
+      ? discoverLibraries(project.baseDir())
+      : parameters.javaLibraries();
+    var testLibraries = parameters.javaTestLibraries().isEmpty() ? mainLibraries : parameters.javaTestLibraries();
+
+    var analysisWarnings = new ArrayList<String>();
+    var doctorWarnings = new ArrayList<String>();
+    if (project.filesOfKind(FileKind.JAVA).size() > 1 && mainBinaries.isEmpty()) {
+      analysisWarnings.add("Compiled classes were not found; local Java analysis may miss semantic issues until sonar.java.binaries is set.");
+      doctorWarnings.add("No compiled main classes were resolved for sonar.java.binaries.");
+    }
+    if (!project.files().stream().filter(file -> file.kind() == FileKind.JAVA).filter(file -> file.sourceType() == SourceType.TEST).toList().isEmpty() && testBinaries.isEmpty()) {
+      analysisWarnings.add("Test bytecode was not found; test-only Java rules may be less accurate until sonar.java.test.binaries is set.");
+      doctorWarnings.add("No compiled test classes were resolved for sonar.java.test.binaries.");
+    }
+    if (mainLibraries.isEmpty()) {
+      analysisWarnings.add("Dependencies/libraries were not resolved; Java analysis may be less precise until sonar.java.libraries is set.");
+      doctorWarnings.add("No dependency jars were resolved for sonar.java.libraries.");
+    }
+    if (!project.files().stream().filter(file -> file.kind() == FileKind.JAVA).filter(file -> file.sourceType() == SourceType.TEST).toList().isEmpty() && testLibraries.isEmpty()) {
+      doctorWarnings.add("No dependency jars were resolved for sonar.java.test.libraries.");
+    }
+
+    return new ResolvedJavaInputs(
+      List.copyOf(mainBinaries),
+      List.copyOf(mainLibraries),
+      List.copyOf(testBinaries),
+      List.copyOf(testLibraries),
+      List.copyOf(analysisWarnings),
+      List.copyOf(doctorWarnings),
+      List.copyOf(remediationHints(project.baseDir(), mainBinaries.isEmpty(), testBinaries.isEmpty(), mainLibraries.isEmpty()))
+    );
+  }
+
+  private static List<Path> discoverDirectories(Path baseDir, List<String> suffixes, java.util.function.Predicate<Path> contentsPredicate) {
+    try (Stream<Path> paths = Files.walk(baseDir, 6)) {
+      return paths
+        .filter(Files::isDirectory)
+        .filter(path -> matchesAnySuffix(baseDir, path, suffixes))
+        .filter(contentsPredicate)
+        .sorted()
+        .toList();
+    } catch (IOException e) {
+      return List.of();
+    }
+  }
+
+  private static List<Path> discoverLibraries(Path baseDir) {
+    try (Stream<Path> paths = Files.walk(baseDir, 6)) {
+      return paths
+        .filter(Files::isRegularFile)
+        .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar"))
+        .filter(path -> LIBRARY_DIRECTORY_NAMES.contains(path.getParent().getFileName().toString().toLowerCase(Locale.ROOT)))
+        .sorted()
+        .toList();
+    } catch (IOException e) {
+      return List.of();
+    }
+  }
+
+  private static boolean matchesAnySuffix(Path baseDir, Path candidate, List<String> suffixes) {
+    var relative = baseDir.toAbsolutePath().normalize().relativize(candidate.toAbsolutePath().normalize()).toString().replace('\\', '/');
+    for (String suffix : suffixes) {
+      if (relative.equals(suffix) || relative.endsWith("/" + suffix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean containsClassFiles(Path directory) {
+    try (Stream<Path> files = Files.walk(directory, 2)) {
+      return files.anyMatch(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".class"));
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  private static List<String> remediationHints(
+    Path baseDir,
+    boolean needsMainBinaries,
+    boolean needsTestBinaries,
+    boolean needsLibraries
+  ) {
+    var hints = new LinkedHashSet<String>();
+    if (Files.exists(baseDir.resolve("pom.xml")) || Files.exists(baseDir.resolve("mvnw"))) {
+      if (needsMainBinaries || needsTestBinaries) {
+        hints.add("Compile first with `mvn -q -DskipTests compile test-compile`, then re-run the CLI.");
+      }
+      if (needsLibraries) {
+        hints.add(
+          "If dependencies are unpacked locally, point `--java-libraries` (and optionally `--java-test-libraries`) at jars such as `target/dependency/*.jar`."
+        );
+      }
+    } else if (
+      Files.exists(baseDir.resolve("build.gradle")) ||
+      Files.exists(baseDir.resolve("build.gradle.kts")) ||
+      Files.exists(baseDir.resolve("gradlew"))
+    ) {
+      if (needsMainBinaries || needsTestBinaries) {
+        hints.add("Compile first with `./gradlew classes testClasses`, then re-run the CLI.");
+      }
+      if (needsLibraries) {
+        hints.add("Point `--java-libraries` at dependency jars or directories such as `build/dependencies`, `libs`, or `lib`.");
+      }
+    } else {
+      if (needsMainBinaries) {
+        hints.add("Pass compiled output directories with `--java-binaries` (for example `target/classes` or `build/classes/java/main`).");
+      }
+      if (needsTestBinaries) {
+        hints.add("Pass compiled test output directories with `--java-test-binaries` when test sources are analyzed.");
+      }
+      if (needsLibraries) {
+        hints.add("Pass dependency jars or directories with `--java-libraries` so semantic Java analysis can resolve external types.");
+      }
+    }
+    if (needsMainBinaries || needsTestBinaries) {
+      hints.add("If build outputs live outside the analyzed root, pass absolute paths to `--java-binaries` and `--java-test-binaries`.");
+    }
+    return List.copyOf(hints);
+  }
+
   private static Map<String, Integer> javaFileCounts(List<ScannedFile> javaFiles) {
     var counts = new LinkedHashMap<String, Integer>();
     counts.put("js-ts", 0);
@@ -289,6 +462,27 @@ public final class JavaAnalyzerRuntime {
     counts.put("css", 0);
     counts.put("java", javaFiles.size());
     return Map.copyOf(counts);
+  }
+
+  private record ResolvedJavaInputs(
+    List<Path> mainBinaries,
+    List<Path> mainLibraries,
+    List<Path> testBinaries,
+    List<Path> testLibraries,
+    List<String> analysisWarnings,
+    List<String> doctorWarnings,
+    List<String> remediationHints
+  ) {}
+
+  private static final class CapturingClasspathForMain extends ClasspathForMain {
+    private CapturingClasspathForMain(Configuration configuration, FileSystem fileSystem, AnalysisWarningsWrapper analysisWarnings) {
+      super(configuration, fileSystem, analysisWarnings);
+    }
+
+    @Override
+    protected boolean isSonarLint() {
+      return true;
+    }
   }
 
   private static final class MapBackedConfiguration implements Configuration {

@@ -14,6 +14,7 @@ import com.donatomartin.sonarcli.core.scan.DiscoveredProject;
 import com.donatomartin.sonarcli.core.scan.ProjectScanner;
 import com.donatomartin.sonarcli.core.scan.ScannedFile;
 import com.donatomartin.sonarcli.core.util.IssueComparators;
+import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import com.donatomartin.sonarcli.core.util.TextSupport;
 import java.io.PrintWriter;
 import java.nio.file.Files;
@@ -86,7 +87,8 @@ public final class SonarAnalyzerCli implements Runnable {
 
   @Command(name = "rules", mixinStandardHelpOptions = true, description = "Inspect the packaged rule catalog", subcommands = {
     RulesListCommand.class,
-    RulesShowCommand.class
+    RulesShowCommand.class,
+    RulesProfilesCommand.class
   })
   static final class RulesCommand implements Runnable {
     @Override
@@ -114,7 +116,7 @@ public final class SonarAnalyzerCli implements Runnable {
         lines.add(
           String.format(
             Locale.ROOT,
-            "%-10s  %-6s  %-6s  %-12s  %-10s  %s",
+            "%-18s  %-6s  %-6s  %-18s  %-10s  %s",
             rule.selector(),
             rule.analyzerId(),
             String.join(",", rule.languages()),
@@ -143,7 +145,21 @@ public final class SonarAnalyzerCli implements Runnable {
       }
       var lines = new ArrayList<String>();
       for (RuleDefinition rule : matches) {
-        lines.add(rule.selector());
+        var displayedSelector = RuleSelectorSupport.repoSelectors(rule).stream()
+          .filter(selector -> selector.equalsIgnoreCase(ruleKey.trim()))
+          .findFirst()
+          .orElse(rule.selector());
+        lines.add(displayedSelector);
+        if (!displayedSelector.equals(rule.selector())) {
+          lines.add("  Canonical: " + rule.selector());
+        }
+        var aliases = RuleSelectorSupport.repoSelectors(rule).stream()
+          .filter(selector -> !selector.equals(displayedSelector))
+          .toList();
+        if (!aliases.isEmpty()) {
+          lines.add("  Aliases: " + String.join(", ", aliases));
+        }
+        lines.add("  Raw key: " + rule.rawKey());
         lines.add("  Title: " + rule.title());
         lines.add("  Analyzer: " + rule.analyzerId());
         lines.add("  Family: " + rule.family());
@@ -167,6 +183,44 @@ public final class SonarAnalyzerCli implements Runnable {
           }
         }
         lines.add("");
+      }
+      REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "profiles", mixinStandardHelpOptions = true, description = "List packaged quality profiles")
+  static final class RulesProfilesCommand implements Callable<Integer> {
+
+    @Option(names = "--analyzer", split = ",", description = "Filter by analyzer")
+    List<String> analyzers = new ArrayList<>();
+
+    @Override
+    public Integer call() {
+      var analyzerIds = normalizeAnalyzerIds(analyzers);
+      var rules = loadCatalog().allRules(analyzerIds);
+      var profileCounts = new LinkedHashMap<String, Integer>();
+      var profileAnalyzers = new LinkedHashMap<String, Set<String>>();
+      for (RuleDefinition rule : rules) {
+        for (String profile : rule.defaultQualityProfiles()) {
+          profileCounts.merge(profile, 1, Integer::sum);
+          profileAnalyzers.computeIfAbsent(profile, ignored -> new LinkedHashSet<>()).add(rule.analyzerId());
+        }
+      }
+      var lines = new ArrayList<String>();
+      for (Map.Entry<String, Integer> entry : profileCounts.entrySet()) {
+        lines.add(
+          String.format(
+            Locale.ROOT,
+            "%-24s  %-8s  %d rules",
+            entry.getKey(),
+            String.join(",", profileAnalyzers.getOrDefault(entry.getKey(), Set.of())),
+            entry.getValue()
+          )
+        );
+      }
+      if (lines.isEmpty()) {
+        lines.add("No profiles found.");
       }
       REPORT_RENDERER.printRuleList(lines);
       return 0;
@@ -213,7 +267,7 @@ public final class SonarAnalyzerCli implements Runnable {
       if (!Files.isRegularFile(absoluteFile)) {
         throw new IllegalArgumentException("Not a file: " + absoluteFile);
       }
-      var baseDir = options.baseDir != null ? options.baseDir : absoluteFile.getParent();
+      var baseDir = options.baseDir != null ? options.baseDir : ProjectRootResolver.inferBaseDir(absoluteFile);
       var relative = baseDir.toAbsolutePath().normalize().relativize(absoluteFile).toString().replace('\\', '/');
       var project = PROJECT_SCANNER.scan(
         baseDir,
@@ -358,6 +412,7 @@ public final class SonarAnalyzerCli implements Runnable {
   ) {
     var analyzerVersions = new LinkedHashMap<String, String>();
     var warnings = new ArrayList<String>();
+    warnings.addAll(selectedRules.selectionWarnings());
     var issues = new ArrayList<com.donatomartin.sonarcli.core.model.IssueRecord>();
     var fileCounts = new LinkedHashMap<String, Integer>();
     int parsingErrors = 0;
@@ -447,7 +502,7 @@ public final class SonarAnalyzerCli implements Runnable {
   }
 
   private static void configureLogging(boolean debug, boolean debugBridge) {
-    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", debug ? "debug" : "warn");
+    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", debug ? "debug" : "error");
     System.setProperty("org.slf4j.simpleLogger.log.org.sonar.plugins.javascript.bridge", debugBridge ? "debug" : "off");
     System.setProperty("org.slf4j.simpleLogger.log.org.sonar.plugins.javascript.nodejs", debugBridge ? "debug" : "off");
     System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");

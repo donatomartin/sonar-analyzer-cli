@@ -2,8 +2,8 @@ package com.donatomartin.sonarcli.core.catalog;
 
 import com.donatomartin.sonarcli.core.model.RuleConfigFile;
 import com.donatomartin.sonarcli.core.model.RuleDefinition;
-import com.donatomartin.sonarcli.core.model.RuleFamily;
 import com.donatomartin.sonarcli.core.util.JsonSupport;
+import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,17 +25,12 @@ public final class RuleCatalog {
   private final Map<String, List<RuleDefinition>> byRawKey;
 
   public RuleCatalog(List<RuleDefinition> rules) {
-    var collisions = rules.stream().collect(
-      LinkedHashMap<String, Integer>::new,
-      (map, rule) -> map.merge(rule.rawKey(), 1, Integer::sum),
-      Map::putAll
-    );
     this.rules = rules.stream()
       .map(rule -> new RuleDefinition(
         rule.analyzerId(),
         rule.family(),
         rule.rawKey(),
-        selectorFor(rule.family(), rule.rawKey(), collisions.getOrDefault(rule.rawKey(), 0) > 1),
+        RuleSelectorSupport.primarySelector(rule),
         rule.title(),
         rule.descriptionHtml(),
         rule.type(),
@@ -47,13 +42,13 @@ public final class RuleCatalog {
       ))
       .sorted(Comparator.comparing(RuleDefinition::selector))
       .toList();
-    this.bySelector = this.rules.stream().collect(
-      LinkedHashMap::new,
-      (map, rule) -> map.put(normalize(rule.selector()), rule),
-      Map::putAll
-    );
+    this.bySelector = new LinkedHashMap<>();
     this.byRawKey = new LinkedHashMap<>();
     for (RuleDefinition rule : this.rules) {
+      bySelector.put(normalize(rule.selector()), rule);
+      for (String alias : RuleSelectorSupport.selectorAliases(rule)) {
+        bySelector.put(normalize(alias), rule);
+      }
       byRawKey.computeIfAbsent(normalize(rule.rawKey()), ignored -> new ArrayList<>()).add(rule);
     }
   }
@@ -90,20 +85,21 @@ public final class RuleCatalog {
     Set<String> analyzerIds
   ) throws IOException {
     var enabled = new LinkedHashMap<String, RuleDefinition>();
+    var selectionWarnings = new ArrayList<String>();
     var availableRules = allRules(analyzerIds);
     if (rulesProfileOrFile == null || rulesProfileOrFile.isBlank()) {
       selectDefaultRules(enabled, availableRules);
     } else {
       var candidatePath = Path.of(rulesProfileOrFile);
       if (Files.exists(candidatePath)) {
-        applyRuleFile(enabled, availableRules, candidatePath, analyzerIds);
+        applyRuleFile(enabled, availableRules, candidatePath, analyzerIds, selectionWarnings);
       } else {
         selectProfile(enabled, availableRules, rulesProfileOrFile);
       }
     }
 
-    applyTokens(enabled, enableTokens, analyzerIds, true);
-    applyTokens(enabled, disableTokens, analyzerIds, false);
+    applyTokens(enabled, enableTokens, analyzerIds, true, selectionWarnings);
+    applyTokens(enabled, disableTokens, analyzerIds, false, selectionWarnings);
 
     var selectedRules = enabled.values().stream()
       .sorted(Comparator.comparing(RuleDefinition::selector))
@@ -118,7 +114,7 @@ public final class RuleCatalog {
       Map::putAll
     );
 
-    return new SelectedRuleSet(selectedRules, Map.copyOf(rulesByAnalyzer));
+    return new SelectedRuleSet(selectedRules, Map.copyOf(rulesByAnalyzer), List.copyOf(selectionWarnings));
   }
 
   private static void selectDefaultRules(Map<String, RuleDefinition> enabled, List<RuleDefinition> availableRules) {
@@ -144,7 +140,8 @@ public final class RuleCatalog {
     Map<String, RuleDefinition> enabled,
     List<RuleDefinition> availableRules,
     Path candidatePath,
-    Set<String> analyzerIds
+    Set<String> analyzerIds,
+    List<String> selectionWarnings
   ) throws IOException {
     var config = parseRuleFile(candidatePath);
     if (config.profiles() == null || config.profiles().isEmpty()) {
@@ -154,8 +151,8 @@ public final class RuleCatalog {
         selectProfile(enabled, availableRules, profile);
       }
     }
-    applyTokens(enabled, config.enable(), analyzerIds, true);
-    applyTokens(enabled, config.disable(), analyzerIds, false);
+    applyTokens(enabled, config.enable(), analyzerIds, true, selectionWarnings);
+    applyTokens(enabled, config.disable(), analyzerIds, false, selectionWarnings);
   }
 
   private RuleConfigFile parseRuleFile(Path file) throws IOException {
@@ -207,7 +204,8 @@ public final class RuleCatalog {
     Map<String, RuleDefinition> enabled,
     List<String> tokens,
     Set<String> analyzerIds,
-    boolean add
+    boolean add,
+    List<String> selectionWarnings
   ) {
     if (tokens == null) {
       return;
@@ -218,6 +216,11 @@ public final class RuleCatalog {
       }
       var matches = find(token, analyzerIds);
       if (matches.isEmpty()) {
+        var remoteOnlyWarning = RuleSelectorSupport.remoteOnlySelectionWarning(token);
+        if (remoteOnlyWarning.isPresent()) {
+          selectionWarnings.add(remoteOnlyWarning.get());
+          continue;
+        }
         throw new IllegalArgumentException("Unknown rule selector: " + token);
       }
       for (RuleDefinition match : matches) {
@@ -243,12 +246,5 @@ public final class RuleCatalog {
 
   private static String normalize(String value) {
     return value.trim().toLowerCase(Locale.ROOT);
-  }
-
-  public static String selectorFor(RuleFamily family, String rawKey, boolean ambiguous) {
-    if (!ambiguous) {
-      return rawKey;
-    }
-    return family.selectorPrefix() + ":" + rawKey;
   }
 }

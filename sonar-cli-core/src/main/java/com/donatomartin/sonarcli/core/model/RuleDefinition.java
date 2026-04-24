@@ -1,7 +1,7 @@
 package com.donatomartin.sonarcli.core.model;
 
+import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import java.util.List;
-import java.util.Locale;
 
 public record RuleDefinition(
   String analyzerId,
@@ -31,8 +31,6 @@ public record RuleDefinition(
   }
 
   public boolean matchesFamily(String requestedFamily) {
-    return requestedFamily == null || requestedFamily.isBlank()
-      || family.name().equalsIgnoreCase(requestedFamily)
-      || family.selectorPrefix().equals(requestedFamily.toLowerCase(Locale.ROOT));
+    return RuleSelectorSupport.matchesRequestedFamily(this, requestedFamily);
   }
 }

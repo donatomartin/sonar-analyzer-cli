@@ -11,6 +11,7 @@ import com.donatomartin.sonarcli.core.runtime.AnalyzerResult;
 import com.donatomartin.sonarcli.core.scan.DiscoveredProject;
 import com.donatomartin.sonarcli.core.scan.FileKind;
 import com.donatomartin.sonarcli.core.scan.ScannedFile;
+import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -73,16 +74,18 @@ public final class JsAnalyzerRuntime implements AutoCloseable {
     int parsingErrors = 0;
 
     if (!project.filesOfKind(FileKind.JS_TS).isEmpty() && !runtimeRules.jsRuntimeRules().isEmpty()) {
+      boolean clearDependenciesCache = true;
       for (ScannedFile file : project.filesOfKind(FileKind.JS_TS)) {
         parsingErrors += appendIssues(
           project.baseDir(),
           file,
-          analyzeJsTsFile(file, bridgeConfiguration, project),
+          analyzeJsTsFile(file, bridgeConfiguration, project, clearDependenciesCache),
           runtimeRules.ruleByRawKey(),
           runtimeRules.cssRuleKeyByStylelintKey(),
           warnings,
           issues
         );
+        clearDependenciesCache = false;
       }
     }
     if (!runtimeRules.jsRuntimeRules().isEmpty()) {
@@ -140,7 +143,7 @@ public final class JsAnalyzerRuntime implements AutoCloseable {
     var warnings = new ArrayList<String>();
     var issues = new ArrayList<IssueRecord>();
     BridgeServer.AnalysisResponse response = switch (file.kind()) {
-      case JS_TS -> analyzeJsTsFile(file, bridgeConfiguration, project);
+      case JS_TS -> analyzeJsTsFile(file, bridgeConfiguration, project, true);
       case CSS -> analyzeCssFile(file, bridgeConfiguration, runtimeRules);
       case HTML -> analyzeMarkupFile(file, bridgeConfiguration, true);
       case YAML -> analyzeMarkupFile(file, bridgeConfiguration, false);
@@ -271,7 +274,8 @@ public final class JsAnalyzerRuntime implements AutoCloseable {
   private BridgeServer.AnalysisResponse analyzeJsTsFile(
     ScannedFile file,
     BridgeServer.ProjectAnalysisConfiguration bridgeConfiguration,
-    DiscoveredProject project
+    DiscoveredProject project,
+    boolean clearDependenciesCache
   ) throws IOException {
     var tsconfigs = project.tsconfigPaths().isEmpty() ? null : project.tsconfigPaths().stream().map(Path::toString).toList();
     var request = new BridgeServer.JsAnalysisRequest(
@@ -284,7 +288,7 @@ public final class JsAnalyzerRuntime implements AutoCloseable {
       InputFile.Status.ADDED,
       AnalysisMode.DEFAULT,
       true,
-      true,
+      clearDependenciesCache,
       true,
       true,
       bridgeConfiguration
@@ -335,7 +339,12 @@ public final class JsAnalyzerRuntime implements AutoCloseable {
           "js",
           rule != null ? rule.family() : inferFamily(file),
           rawRuleKey,
-          rule != null ? rule.selector() : rawRuleKey,
+          RuleSelectorSupport.selectorForIssue(
+            rule,
+            rawRuleKey,
+            issue.language(),
+            issue.filePath() != null ? Path.of(issue.filePath()) : file.path()
+          ),
           relativePath(baseDir, issue.filePath() != null ? Path.of(issue.filePath()) : file.path()),
           issue.line() == null ? 1 : issue.line(),
           issue.column() == null ? 0 : issue.column(),
