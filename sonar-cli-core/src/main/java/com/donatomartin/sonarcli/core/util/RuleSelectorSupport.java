@@ -118,6 +118,18 @@ public final class RuleSelectorSupport {
     );
   }
 
+  public static String prefixedSelectorHint(String token) {
+    if (token == null || token.isBlank() || token.contains(":")) {
+      return "";
+    }
+    var normalized = token.trim();
+    return ". Use a prefixed selector such as javascript:" + normalized
+      + ", typescript:" + normalized
+      + ", java:" + normalized
+      + ", or css:" + normalized
+      + ".";
+  }
+
   private static String primaryPrefix(RuleDefinition rule) {
     return switch (rule.family()) {
       case JAVA -> "java";

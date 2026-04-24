@@ -6,6 +6,7 @@ import com.donatomartin.sonarcli.core.catalog.RuleCatalog;
 import com.donatomartin.sonarcli.core.catalog.SelectedRuleSet;
 import com.donatomartin.sonarcli.core.model.AnalysisReport;
 import com.donatomartin.sonarcli.core.model.ReportStats;
+import com.donatomartin.sonarcli.core.model.RuleConfigFile;
 import com.donatomartin.sonarcli.core.model.RuleDefinition;
 import com.donatomartin.sonarcli.core.runtime.AnalysisParameters;
 import com.donatomartin.sonarcli.core.runtime.AnalyzerModule;
@@ -14,9 +15,11 @@ import com.donatomartin.sonarcli.core.scan.DiscoveredProject;
 import com.donatomartin.sonarcli.core.scan.ProjectScanner;
 import com.donatomartin.sonarcli.core.scan.ScannedFile;
 import com.donatomartin.sonarcli.core.util.IssueComparators;
+import com.donatomartin.sonarcli.core.util.RuleConfigSupport;
 import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import com.donatomartin.sonarcli.core.util.TextSupport;
 import java.io.PrintWriter;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -30,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import picocli.AutoComplete;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.ExecutionException;
@@ -43,9 +47,11 @@ import picocli.CommandLine.Parameters;
   description = "Standalone Sonar JS + Java analyzer CLI",
   subcommands = {
     SonarAnalyzerCli.RulesCommand.class,
+    SonarAnalyzerCli.ProfileCommand.class,
     SonarAnalyzerCli.AnalyzeCommand.class,
     SonarAnalyzerCli.AnalyzeFileCommand.class,
-    SonarAnalyzerCli.DoctorCommand.class
+    SonarAnalyzerCli.DoctorCommand.class,
+    SonarAnalyzerCli.CompletionCommand.class
   }
 )
 public final class SonarAnalyzerCli implements Runnable {
@@ -61,9 +67,7 @@ public final class SonarAnalyzerCli implements Runnable {
   );
 
   public static void main(String[] args) {
-    var commandLine = new CommandLine(new SonarAnalyzerCli());
-    commandLine.setExecutionExceptionHandler((exception, cmd, parseResult) -> handleException(exception, cmd));
-    int exitCode = commandLine.execute(args);
+    int exitCode = newCommandLine().execute(args);
     System.exit(exitCode);
   }
 
@@ -85,6 +89,12 @@ public final class SonarAnalyzerCli implements Runnable {
     return 2;
   }
 
+  static CommandLine newCommandLine() {
+    var commandLine = new CommandLine(new SonarAnalyzerCli());
+    commandLine.setExecutionExceptionHandler((exception, cmd, parseResult) -> handleException(exception, cmd));
+    return commandLine;
+  }
+
   @Command(name = "rules", mixinStandardHelpOptions = true, description = "Inspect the packaged rule catalog", subcommands = {
     RulesListCommand.class,
     RulesShowCommand.class,
@@ -100,10 +110,19 @@ public final class SonarAnalyzerCli implements Runnable {
   @Command(name = "list", mixinStandardHelpOptions = true, description = "List available rules")
   static final class RulesListCommand implements Callable<Integer> {
 
-    @Option(names = "--family", description = "Filter by family")
+    @Option(
+      names = "--family",
+      description = "Filter by family",
+      completionCandidates = CliCompletionCandidates.RuleFamilies.class
+    )
     String family;
 
-    @Option(names = "--analyzer", split = ",", description = "Filter by analyzer")
+    @Option(
+      names = "--analyzer",
+      split = ",",
+      description = "Filter by analyzer",
+      completionCandidates = CliCompletionCandidates.AnalyzerIds.class
+    )
     List<String> analyzers = new ArrayList<>();
 
     @Override
@@ -134,14 +153,18 @@ public final class SonarAnalyzerCli implements Runnable {
   @Command(name = "show", mixinStandardHelpOptions = true, description = "Show metadata for one rule")
   static final class RulesShowCommand implements Callable<Integer> {
 
-    @Parameters(index = "0", description = "Rule selector or raw key")
+    @Parameters(
+      index = "0",
+      description = "Prefixed rule selector",
+      completionCandidates = CliCompletionCandidates.RuleSelectors.class
+    )
     String ruleKey;
 
     @Override
     public Integer call() {
       var matches = loadCatalog().find(ruleKey);
       if (matches.isEmpty()) {
-        throw new IllegalArgumentException("Unknown rule selector: " + ruleKey);
+        throw new IllegalArgumentException("Unknown rule selector: " + ruleKey + RuleSelectorSupport.prefixedSelectorHint(ruleKey));
       }
       var lines = new ArrayList<String>();
       for (RuleDefinition rule : matches) {
@@ -192,7 +215,12 @@ public final class SonarAnalyzerCli implements Runnable {
   @Command(name = "profiles", mixinStandardHelpOptions = true, description = "List packaged quality profiles")
   static final class RulesProfilesCommand implements Callable<Integer> {
 
-    @Option(names = "--analyzer", split = ",", description = "Filter by analyzer")
+    @Option(
+      names = "--analyzer",
+      split = ",",
+      description = "Filter by analyzer",
+      completionCandidates = CliCompletionCandidates.AnalyzerIds.class
+    )
     List<String> analyzers = new ArrayList<>();
 
     @Override
@@ -223,6 +251,206 @@ public final class SonarAnalyzerCli implements Runnable {
         lines.add("No profiles found.");
       }
       REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "profile", mixinStandardHelpOptions = true, description = "Manage saved local rule profiles", subcommands = {
+    ProfileListCommand.class,
+    ProfileCurrentCommand.class,
+    ProfileShowCommand.class,
+    ProfileSaveCommand.class,
+    ProfileUseCommand.class,
+    ProfileClearCommand.class,
+    ProfileDeleteCommand.class
+  })
+  static final class ProfileCommand implements Runnable {
+    @Override
+    public void run() {
+      CommandLine.usage(this, System.out);
+    }
+  }
+
+  @Command(name = "list", mixinStandardHelpOptions = true, description = "List managed profiles stored in the user config directory")
+  static final class ProfileListCommand implements Callable<Integer> {
+
+    @Override
+    public Integer call() throws Exception {
+      var store = profileStore();
+      var current = store.currentProfile().orElse(null);
+      var profiles = store.listProfiles();
+      var lines = new ArrayList<String>();
+      lines.add("Config dir: " + store.configDir());
+      if (current == null) {
+        lines.add("Current: <none>");
+      } else {
+        lines.add("Current: " + current.name() + (current.exists() ? "" : " (missing)"));
+      }
+      lines.add("");
+      if (profiles.isEmpty()) {
+        lines.add("No managed profiles.");
+      } else {
+        for (ManagedProfileStore.ManagedProfile profile : profiles) {
+          var marker = current != null && current.name().equals(profile.name()) ? "*" : " ";
+          lines.add(String.format(Locale.ROOT, "%s %-20s %s", marker, profile.name(), profile.path()));
+        }
+      }
+      if (current != null && !current.exists() && profiles.stream().noneMatch(profile -> profile.name().equals(current.name()))) {
+        lines.add(String.format(Locale.ROOT, "! %-20s %s", current.name(), current.path()));
+      }
+      REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "current", mixinStandardHelpOptions = true, description = "Show the current managed profile")
+  static final class ProfileCurrentCommand implements Callable<Integer> {
+
+    @Override
+    public Integer call() throws Exception {
+      var current = profileStore().currentProfile();
+      var lines = new ArrayList<String>();
+      if (current.isEmpty()) {
+        lines.add("No current managed profile set.");
+      } else {
+        var value = current.get();
+        lines.add("Current profile: " + value.name());
+        lines.add("Path: " + value.path());
+        lines.add("Status: " + (value.exists() ? "ready" : "missing"));
+      }
+      REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "show", mixinStandardHelpOptions = true, description = "Show one managed profile")
+  static final class ProfileShowCommand implements Callable<Integer> {
+
+    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    String profileName;
+
+    @Override
+    public Integer call() throws Exception {
+      var store = profileStore();
+      var config = store.load(profileName);
+      var current = store.currentProfile().map(ManagedProfileStore.CurrentProfile::name).orElse(null);
+      var lines = new ArrayList<String>();
+      lines.add("Name: " + profileName);
+      lines.add("Path: " + store.pathFor(profileName));
+      lines.add("Current: " + Boolean.toString(profileName.equals(current)));
+      lines.add("");
+      lines.addAll(List.of(RuleConfigSupport.toYaml(config).split("\\R")));
+      REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "save", mixinStandardHelpOptions = true, description = "Create or update a managed profile")
+  static final class ProfileSaveCommand implements Callable<Integer> {
+
+    @Parameters(index = "0", description = "Managed profile name")
+    String profileName;
+
+    @Option(
+      names = "--from-profile",
+      description = "Base managed or packaged profile name",
+      completionCandidates = CliCompletionCandidates.ManagedAndPackagedProfileNames.class
+    )
+    String fromProfile;
+
+    @Option(names = "--from-file", description = "Base JSON/YAML rule file")
+    Path fromFile;
+
+    @Option(
+      names = "--enable",
+      split = ",",
+      description = "Enable one or more rules",
+      completionCandidates = CliCompletionCandidates.RuleSelectors.class
+    )
+    List<String> enable = new ArrayList<>();
+
+    @Option(
+      names = "--disable",
+      split = ",",
+      description = "Disable one or more rules",
+      completionCandidates = CliCompletionCandidates.RuleSelectors.class
+    )
+    List<String> disable = new ArrayList<>();
+
+    @Option(names = "--use", description = "Set this profile as the current managed profile after saving")
+    boolean use;
+
+    @Option(names = "--force", description = "Overwrite an existing managed profile")
+    boolean force;
+
+    @Override
+    public Integer call() throws Exception {
+      if (fromProfile != null && fromFile != null) {
+        throw new IllegalArgumentException("Use either --from-profile or --from-file, not both.");
+      }
+      var catalog = loadCatalog();
+      var store = profileStore();
+      var config = buildManagedProfileConfig(catalog, store, fromProfile, fromFile, enable, disable);
+      var selectedRules = catalog.resolveSelection(config, allAnalyzerIds());
+      store.save(profileName, config, force);
+      if (use) {
+        store.use(profileName);
+      }
+
+      var lines = new ArrayList<String>();
+      lines.add("Saved managed profile: " + profileName);
+      lines.add("Path: " + store.pathFor(profileName));
+      lines.add("Current: " + (use ? profileName : store.currentProfile().map(ManagedProfileStore.CurrentProfile::name).orElse("<unchanged>")));
+      lines.add(
+        "Rules: " + selectedRules.selectedRules().size() + " active across " + selectedRules.rulesByAnalyzer().size() + " analyzers"
+      );
+      if (!selectedRules.selectionWarnings().isEmpty()) {
+        lines.add("");
+        lines.add("Warnings:");
+        for (String warning : selectedRules.selectionWarnings()) {
+          lines.add("  - " + warning);
+        }
+      }
+      REPORT_RENDERER.printRuleList(lines);
+      return 0;
+    }
+  }
+
+  @Command(name = "use", mixinStandardHelpOptions = true, description = "Set the current managed profile")
+  static final class ProfileUseCommand implements Callable<Integer> {
+
+    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    String profileName;
+
+    @Override
+    public Integer call() throws Exception {
+      profileStore().use(profileName);
+      REPORT_RENDERER.printRuleList(List.of("Current managed profile: " + profileName));
+      return 0;
+    }
+  }
+
+  @Command(name = "clear", mixinStandardHelpOptions = true, description = "Clear the current managed profile")
+  static final class ProfileClearCommand implements Callable<Integer> {
+
+    @Override
+    public Integer call() throws Exception {
+      profileStore().clearCurrent();
+      REPORT_RENDERER.printRuleList(List.of("Cleared current managed profile."));
+      return 0;
+    }
+  }
+
+  @Command(name = "delete", mixinStandardHelpOptions = true, description = "Delete one managed profile")
+  static final class ProfileDeleteCommand implements Callable<Integer> {
+
+    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    String profileName;
+
+    @Override
+    public Integer call() throws Exception {
+      profileStore().delete(profileName);
+      REPORT_RENDERER.printRuleList(List.of("Deleted managed profile: " + profileName));
       return 0;
     }
   }
@@ -320,6 +548,28 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
+  @Command(name = "completion", mixinStandardHelpOptions = true, description = "Generate shell completion scripts")
+  static final class CompletionCommand implements Callable<Integer> {
+
+    enum Shell {
+      bash,
+      zsh
+    }
+
+    @Option(names = "--shell", required = true, description = "Target shell: ${COMPLETION-CANDIDATES}")
+    Shell shell;
+
+    @Option(names = "--command-name", defaultValue = "sonar-analyzer-cli", description = "Bare command name to register")
+    String commandName;
+
+    @Override
+    public Integer call() {
+      validateCompletionCommandName(commandName);
+      System.out.print(renderCompletionScript(shell, commandName));
+      return 0;
+    }
+  }
+
   private static Integer runProjectAnalysis(
     Path baseDir,
     DiscoveredProject project,
@@ -329,8 +579,9 @@ public final class SonarAnalyzerCli implements Runnable {
     configureLogging(options.debug, options.debugBridge);
     var parameters = options.toParameters(baseDir, List.copyOf(analyzerIds));
     var catalog = loadCatalog();
+    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, profileStore());
     var selectedRules = catalog.resolveSelection(
-      options.rulesProfileOrFile,
+      rulesSource,
       options.enable,
       options.disable,
       analyzerIds
@@ -350,8 +601,9 @@ public final class SonarAnalyzerCli implements Runnable {
     configureLogging(options.debug, options.debugBridge);
     var parameters = options.toParameters(baseDir, List.copyOf(analyzerIds));
     var catalog = loadCatalog();
+    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, profileStore());
     var selectedRules = catalog.resolveSelection(
-      options.rulesProfileOrFile,
+      rulesSource,
       options.enable,
       options.disable,
       analyzerIds
@@ -446,7 +698,7 @@ public final class SonarAnalyzerCli implements Runnable {
     );
   }
 
-  private static RuleCatalog loadCatalog() {
+  static RuleCatalog loadCatalog() {
     var rules = new ArrayList<RuleDefinition>();
     for (AnalyzerModule module : MODULES) {
       rules.addAll(module.loadRules());
@@ -497,8 +749,133 @@ public final class SonarAnalyzerCli implements Runnable {
     return normalized;
   }
 
-  private static Set<String> allAnalyzerIds() {
+  static Set<String> allAnalyzerIds() {
     return new LinkedHashSet<>(MODULES_BY_ID.keySet());
+  }
+
+  static String resolveRulesSelectionSource(String requestedRulesSource, ManagedProfileStore store) throws IOException {
+    if (requestedRulesSource != null && !requestedRulesSource.isBlank()) {
+      var managedProfile = store.resolveManagedProfile(requestedRulesSource);
+      if (managedProfile != null) {
+        return managedProfile.toString();
+      }
+      if (looksLikeRulesFileReference(requestedRulesSource)) {
+        var candidatePath = Path.of(requestedRulesSource).toAbsolutePath().normalize();
+        if (!Files.exists(candidatePath)) {
+          throw new IllegalArgumentException("Rules file not found: " + candidatePath);
+        }
+      }
+      return requestedRulesSource;
+    }
+    var current = store.currentProfile();
+    if (current.isEmpty()) {
+      return null;
+    }
+    var value = current.get();
+    if (!value.exists()) {
+      throw new IllegalArgumentException(
+        "Current managed profile is missing: " + value.name() + ". Run `profile clear` or recreate the profile."
+      );
+    }
+    return value.path().toString();
+  }
+
+  private static boolean looksLikeRulesFileReference(String value) {
+    var normalized = value.trim().toLowerCase(Locale.ROOT);
+    return normalized.contains("/")
+      || normalized.contains("\\")
+      || normalized.endsWith(".yaml")
+      || normalized.endsWith(".yml")
+      || normalized.endsWith(".json");
+  }
+
+  private static ManagedProfileStore profileStore() {
+    return ManagedProfileStore.defaultStore();
+  }
+
+  private static RuleConfigFile buildManagedProfileConfig(
+    RuleCatalog catalog,
+    ManagedProfileStore store,
+    String fromProfile,
+    Path fromFile,
+    List<String> enable,
+    List<String> disable
+  ) throws IOException {
+    RuleConfigFile baseConfig;
+    if (fromFile != null) {
+      var absoluteFile = fromFile.toAbsolutePath().normalize();
+      if (!Files.isRegularFile(absoluteFile)) {
+        throw new IllegalArgumentException("Not a rules file: " + absoluteFile);
+      }
+      baseConfig = RuleConfigSupport.read(absoluteFile);
+    } else if (fromProfile != null && !fromProfile.isBlank()) {
+      var managedProfile = store.resolveManagedProfile(fromProfile);
+      if (managedProfile != null) {
+        baseConfig = RuleConfigSupport.read(managedProfile);
+      } else {
+        var profileName = fromProfile.trim();
+        catalog.resolveSelection(new RuleConfigFile(List.of(profileName), List.of(), List.of()), allAnalyzerIds());
+        baseConfig = new RuleConfigFile(List.of(profileName), List.of(), List.of());
+      }
+    } else {
+      baseConfig = new RuleConfigFile(List.of("Sonar way"), List.of(), List.of());
+    }
+    return mergeRuleConfig(baseConfig, enable, disable);
+  }
+
+  private static RuleConfigFile mergeRuleConfig(RuleConfigFile baseConfig, List<String> enable, List<String> disable) {
+    var normalized = RuleConfigSupport.normalize(baseConfig);
+    var enabled = new LinkedHashSet<>(normalized.enable());
+    var disabled = new LinkedHashSet<>(normalized.disable());
+
+    for (String token : enable) {
+      if (token == null || token.isBlank()) {
+        continue;
+      }
+      var normalizedToken = token.trim();
+      enabled.add(normalizedToken);
+      disabled.remove(normalizedToken);
+    }
+    for (String token : disable) {
+      if (token == null || token.isBlank()) {
+        continue;
+      }
+      var normalizedToken = token.trim();
+      disabled.add(normalizedToken);
+      enabled.remove(normalizedToken);
+    }
+
+    return new RuleConfigFile(
+      normalized.profiles(),
+      List.copyOf(enabled),
+      List.copyOf(disabled)
+    );
+  }
+
+  private static String renderCompletionScript(CompletionCommand.Shell shell, String commandName) {
+    var bashScript = AutoComplete.bash(commandName, newCommandLine());
+    if (shell == CompletionCommand.Shell.bash) {
+      return bashScript;
+    }
+    return String.join(
+      System.lineSeparator(),
+      "#compdef " + commandName,
+      "autoload -Uz bashcompinit",
+      "bashcompinit",
+      bashScript
+    );
+  }
+
+  private static void validateCompletionCommandName(String commandName) {
+    if (commandName == null || commandName.isBlank()) {
+      throw new IllegalArgumentException("Completion command name is required.");
+    }
+    if (commandName.contains("/") || commandName.contains("\\")) {
+      throw new IllegalArgumentException("Completion command name must be a bare executable name without path separators.");
+    }
+    if (commandName.chars().anyMatch(Character::isWhitespace)) {
+      throw new IllegalArgumentException("Completion command name must not contain whitespace.");
+    }
   }
 
   private static void configureLogging(boolean debug, boolean debugBridge) {

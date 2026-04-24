@@ -14,16 +14,31 @@ public class AnalysisOptionsMixin {
   @Option(names = "--output", description = "Write output to a file")
   Path output;
 
-  @Option(names = "--rules", description = "Built-in profile name or JSON/YAML rule file")
+  @Option(names = "--rules", description = "Managed profile name, packaged quality profile name, or JSON/YAML rule file")
   String rulesProfileOrFile;
 
-  @Option(names = "--enable", split = ",", description = "Enable one or more rules")
+  @Option(
+    names = "--enable",
+    split = ",",
+    description = "Enable one or more rules",
+    completionCandidates = CliCompletionCandidates.RuleSelectors.class
+  )
   List<String> enable = new ArrayList<>();
 
-  @Option(names = "--disable", split = ",", description = "Disable one or more rules")
+  @Option(
+    names = "--disable",
+    split = ",",
+    description = "Disable one or more rules",
+    completionCandidates = CliCompletionCandidates.RuleSelectors.class
+  )
   List<String> disable = new ArrayList<>();
 
-  @Option(names = "--analyzer", split = ",", description = "Analyzers to run: ${COMPLETION-CANDIDATES}")
+  @Option(
+    names = "--analyzer",
+    split = ",",
+    description = "Analyzers to run: ${COMPLETION-CANDIDATES}",
+    completionCandidates = CliCompletionCandidates.AnalyzerIds.class
+  )
   List<String> analyzers = new ArrayList<>();
 
   @Option(names = "--base-dir", description = "Base directory for project-relative paths")

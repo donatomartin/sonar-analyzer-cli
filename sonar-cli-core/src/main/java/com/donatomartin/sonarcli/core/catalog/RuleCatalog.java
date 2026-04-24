@@ -2,21 +2,19 @@ package com.donatomartin.sonarcli.core.catalog;
 
 import com.donatomartin.sonarcli.core.model.RuleConfigFile;
 import com.donatomartin.sonarcli.core.model.RuleDefinition;
-import com.donatomartin.sonarcli.core.util.JsonSupport;
+import com.donatomartin.sonarcli.core.util.RuleConfigSupport;
 import com.donatomartin.sonarcli.core.util.RuleSelectorSupport;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import org.yaml.snakeyaml.Yaml;
 
 public final class RuleCatalog {
 
@@ -66,10 +64,7 @@ public final class RuleCatalog {
 
   public List<RuleDefinition> find(String selectorOrKey) {
     var exact = bySelector.get(normalize(selectorOrKey));
-    if (exact != null) {
-      return List.of(exact);
-    }
-    return byRawKey.getOrDefault(normalize(selectorOrKey), List.of());
+    return exact == null ? List.of() : List.of(exact);
   }
 
   public List<RuleDefinition> find(String selectorOrKey, Set<String> analyzerIds) {
@@ -84,18 +79,46 @@ public final class RuleCatalog {
     List<String> disableTokens,
     Set<String> analyzerIds
   ) throws IOException {
+    if (rulesProfileOrFile == null || rulesProfileOrFile.isBlank()) {
+      return resolveSelection((RuleConfigFile) null, enableTokens, disableTokens, analyzerIds);
+    }
+    var candidatePath = Path.of(rulesProfileOrFile);
+    if (Files.exists(candidatePath)) {
+      return resolveSelection(RuleConfigSupport.read(candidatePath), enableTokens, disableTokens, analyzerIds);
+    }
+    return resolveSelection(
+      new RuleConfigFile(List.of(rulesProfileOrFile), List.of(), List.of()),
+      enableTokens,
+      disableTokens,
+      analyzerIds
+    );
+  }
+
+  public SelectedRuleSet resolveSelection(RuleConfigFile baseConfig, Set<String> analyzerIds) {
+    return resolveSelection(baseConfig, List.of(), List.of(), analyzerIds);
+  }
+
+  public List<String> availableProfiles(Set<String> analyzerIds) {
+    var profiles = new LinkedHashSet<String>();
+    for (RuleDefinition rule : allRules(analyzerIds)) {
+      profiles.addAll(rule.defaultQualityProfiles());
+    }
+    return List.copyOf(profiles);
+  }
+
+  private SelectedRuleSet resolveSelection(
+    RuleConfigFile baseConfig,
+    List<String> enableTokens,
+    List<String> disableTokens,
+    Set<String> analyzerIds
+  ) {
     var enabled = new LinkedHashMap<String, RuleDefinition>();
     var selectionWarnings = new ArrayList<String>();
     var availableRules = allRules(analyzerIds);
-    if (rulesProfileOrFile == null || rulesProfileOrFile.isBlank()) {
+    if (baseConfig == null) {
       selectDefaultRules(enabled, availableRules);
     } else {
-      var candidatePath = Path.of(rulesProfileOrFile);
-      if (Files.exists(candidatePath)) {
-        applyRuleFile(enabled, availableRules, candidatePath, analyzerIds, selectionWarnings);
-      } else {
-        selectProfile(enabled, availableRules, rulesProfileOrFile);
-      }
+      applyRuleConfig(enabled, availableRules, baseConfig, analyzerIds, selectionWarnings);
     }
 
     applyTokens(enabled, enableTokens, analyzerIds, true, selectionWarnings);
@@ -136,14 +159,13 @@ public final class RuleCatalog {
     }
   }
 
-  private void applyRuleFile(
+  private void applyRuleConfig(
     Map<String, RuleDefinition> enabled,
     List<RuleDefinition> availableRules,
-    Path candidatePath,
+    RuleConfigFile config,
     Set<String> analyzerIds,
     List<String> selectionWarnings
-  ) throws IOException {
-    var config = parseRuleFile(candidatePath);
+  ) {
     if (config.profiles() == null || config.profiles().isEmpty()) {
       enabled.clear();
     } else {
@@ -153,37 +175,6 @@ public final class RuleCatalog {
     }
     applyTokens(enabled, config.enable(), analyzerIds, true, selectionWarnings);
     applyTokens(enabled, config.disable(), analyzerIds, false, selectionWarnings);
-  }
-
-  private RuleConfigFile parseRuleFile(Path file) throws IOException {
-    var content = Files.readString(file);
-    var filename = file.getFileName().toString().toLowerCase(Locale.ROOT);
-    if (filename.endsWith(".yaml") || filename.endsWith(".yml")) {
-      Object loaded = new Yaml().load(content);
-      if (!(loaded instanceof Map<?, ?> map)) {
-        return RuleConfigFile.empty();
-      }
-      return new RuleConfigFile(
-        coerceList(map.get("profiles")),
-        coerceList(map.get("enable")),
-        coerceList(map.get("disable"))
-      );
-    }
-    var parsed = JsonSupport.GSON.fromJson(content, RuleConfigFile.class);
-    return parsed == null ? RuleConfigFile.empty() : parsed;
-  }
-
-  private static List<String> coerceList(Object value) {
-    if (value == null) {
-      return List.of();
-    }
-    if (value instanceof Collection<?> collection) {
-      return collection.stream().filter(Objects::nonNull).map(String::valueOf).toList();
-    }
-    if (value instanceof String string) {
-      return List.of(string);
-    }
-    return List.of(String.valueOf(value));
   }
 
   private static void selectProfile(
@@ -221,7 +212,7 @@ public final class RuleCatalog {
           selectionWarnings.add(remoteOnlyWarning.get());
           continue;
         }
-        throw new IllegalArgumentException("Unknown rule selector: " + token);
+        throw new IllegalArgumentException("Unknown rule selector: " + token + RuleSelectorSupport.prefixedSelectorHint(token));
       }
       for (RuleDefinition match : matches) {
         if (add) {
@@ -234,7 +225,7 @@ public final class RuleCatalog {
   }
 
   public RuleDefinition findForIssue(String rawKey, String analyzerId) {
-    var matches = find(rawKey).stream()
+    var matches = byRawKey.getOrDefault(normalize(rawKey), List.of()).stream()
       .filter(rule -> analyzerId == null || analyzerId.equals(rule.analyzerId()))
       .toList();
     return matches.isEmpty() ? null : matches.get(0);

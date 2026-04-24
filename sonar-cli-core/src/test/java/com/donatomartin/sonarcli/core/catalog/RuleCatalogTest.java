@@ -8,6 +8,7 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuleCatalogTest {
@@ -19,7 +20,9 @@ class RuleCatalogTest {
     assertEquals("typescript:S6564", catalog.find("typescript:S6564").get(0).selector());
     assertEquals("javascript:S3776", catalog.find("javascript:S3776").get(0).selector());
     assertEquals("javascript:S3776", catalog.find("typescript:S3776").get(0).selector());
-    assertEquals(2, catalog.find("S3776").size());
+    assertTrue(catalog.find("S3776").isEmpty());
+    assertEquals("javascript:S3776", catalog.findForIssue("S3776", "js").selector());
+    assertEquals("java:S3776", catalog.findForIssue("S3776", "java").selector());
   }
 
   @Test
@@ -35,6 +38,18 @@ class RuleCatalogTest {
 
     assertTrue(selected.selectionWarnings().stream().anyMatch(warning -> warning.contains("Advanced Security injection rules")));
     assertTrue(selected.selectedRules().stream().noneMatch(rule -> rule.rawKey().equals("S6564")));
+  }
+
+  @Test
+  void shouldRejectBareSelectorsWhenEnablingRules() {
+    var catalog = new RuleCatalog(sampleRules());
+
+    var error = assertThrows(
+      IllegalArgumentException.class,
+      () -> catalog.resolveSelection(null, List.of("S3776"), List.of(), Set.of("js", "java"))
+    );
+
+    assertTrue(error.getMessage().contains("Use a prefixed selector"));
   }
 
   private static List<RuleDefinition> sampleRules() {
