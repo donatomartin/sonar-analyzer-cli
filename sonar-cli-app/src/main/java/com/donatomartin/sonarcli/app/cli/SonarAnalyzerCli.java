@@ -554,16 +554,18 @@ public final class SonarAnalyzerCli implements Runnable {
     configureLogging(options.debug, options.debugBridge);
     var parameters = options.toParameters(baseDir, List.copyOf(analyzerIds));
     var catalog = loadCatalog();
-    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, profileStore());
+    var store = profileStore();
+    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, store);
+    var profileConfig = loadProfileConfig(rulesSource);
     var selectedRules = catalog.resolveSelection(
       rulesSource,
       options.enable,
       options.disable,
       analyzerIds
     );
-    var report = analyzeProject(project, analyzerIds, selectedRules, parameters);
+    var report = analyzeProject(project, analyzerIds, selectedRules, parameters, profileConfig);
     REPORT_RENDERER.writeReport(report, options.format, options.output);
-    return report.issues().isEmpty() ? 0 : 1;
+    return computeExitCode(report);
   }
 
   private static Integer runSingleFileAnalysis(
@@ -576,23 +578,26 @@ public final class SonarAnalyzerCli implements Runnable {
     configureLogging(options.debug, options.debugBridge);
     var parameters = options.toParameters(baseDir, List.copyOf(analyzerIds));
     var catalog = loadCatalog();
-    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, profileStore());
+    var store = profileStore();
+    var rulesSource = resolveRulesSelectionSource(options.rulesProfileOrFile, store);
+    var profileConfig = loadProfileConfig(rulesSource);
     var selectedRules = catalog.resolveSelection(
       rulesSource,
       options.enable,
       options.disable,
       analyzerIds
     );
-    var report = analyzeFile(project, target, analyzerIds, selectedRules, parameters);
+    var report = analyzeFile(project, target, analyzerIds, selectedRules, parameters, profileConfig);
     REPORT_RENDERER.writeReport(report, options.format, options.output);
-    return report.issues().isEmpty() ? 0 : 1;
+    return computeExitCode(report);
   }
 
   private static AnalysisReport analyzeProject(
     DiscoveredProject project,
     Set<String> analyzerIds,
     SelectedRuleSet selectedRules,
-    AnalysisParameters parameters
+    AnalysisParameters parameters,
+    RuleConfigFile profileConfig
   ) throws Exception {
     Instant start = Instant.now();
     var results = new ArrayList<AnalyzerResult>();
@@ -605,7 +610,7 @@ public final class SonarAnalyzerCli implements Runnable {
       }
       results.add(module.analyzeProject(project, selectedRules, parameters));
     }
-    return mergeReport(project.baseDir(), analyzerIds, selectedRules, results, Duration.between(start, Instant.now()).toMillis());
+    return mergeReport(project.baseDir(), analyzerIds, selectedRules, results, Duration.between(start, Instant.now()).toMillis(), profileConfig);
   }
 
   private static AnalysisReport analyzeFile(
@@ -613,7 +618,8 @@ public final class SonarAnalyzerCli implements Runnable {
     ScannedFile target,
     Set<String> analyzerIds,
     SelectedRuleSet selectedRules,
-    AnalysisParameters parameters
+    AnalysisParameters parameters,
+    RuleConfigFile profileConfig
   ) throws Exception {
     Instant start = Instant.now();
     var results = new ArrayList<AnalyzerResult>();
@@ -627,7 +633,7 @@ public final class SonarAnalyzerCli implements Runnable {
       }
       results.add(module.analyzeFile(project, target, selectedRules, parameters));
     }
-    return mergeReport(project.baseDir(), analyzerIds, selectedRules, results, Duration.between(start, Instant.now()).toMillis());
+    return mergeReport(project.baseDir(), analyzerIds, selectedRules, results, Duration.between(start, Instant.now()).toMillis(), profileConfig);
   }
 
   private static AnalysisReport mergeReport(
@@ -635,7 +641,8 @@ public final class SonarAnalyzerCli implements Runnable {
     Collection<String> analyzerIds,
     SelectedRuleSet selectedRules,
     List<AnalyzerResult> results,
-    long durationMs
+    long durationMs,
+    RuleConfigFile profileConfig
   ) {
     var analyzerVersions = new LinkedHashMap<String, String>();
     var warnings = new ArrayList<String>();
@@ -669,8 +676,61 @@ public final class SonarAnalyzerCli implements Runnable {
         issues.size(),
         parsingErrors,
         durationMs
-      )
+      ),
+      profileConfig.thresholds() != null ? Map.copyOf(profileConfig.thresholds()) : Map.of(),
+      profileConfig.thresholdsBySeverity() != null ? Map.copyOf(profileConfig.thresholdsBySeverity()) : Map.of()
     );
+  }
+
+  private static RuleConfigFile loadProfileConfig(String rulesSource) throws IOException {
+    if (rulesSource == null || rulesSource.isBlank()) {
+      return RuleConfigFile.empty();
+    }
+    var path = Path.of(rulesSource);
+    if (Files.isRegularFile(path)) {
+      return RuleConfigSupport.read(path);
+    }
+    return RuleConfigFile.empty();
+  }
+
+  private static int computeExitCode(AnalysisReport report) {
+    var thresholds = report.thresholds();
+    var thresholdsBySeverity = report.thresholdsBySeverity();
+    boolean hasAnyThreshold =
+      (thresholds != null && !thresholds.isEmpty())
+      || (thresholdsBySeverity != null && !thresholdsBySeverity.isEmpty());
+
+    if (!hasAnyThreshold) {
+      return report.issues().isEmpty() ? 0 : 1;
+    }
+
+    // Count by type
+    var byType = new LinkedHashMap<String, Integer>();
+    var bySeverity = new LinkedHashMap<String, Integer>();
+    for (var issue : report.issues()) {
+      if (issue.type() != null && !issue.type().isBlank()) {
+        byType.merge(issue.type().toUpperCase(Locale.ROOT), 1, Integer::sum);
+      }
+      if (issue.severity() != null && !issue.severity().isBlank()) {
+        bySeverity.merge(issue.severity().toUpperCase(Locale.ROOT), 1, Integer::sum);
+      }
+    }
+
+    if (thresholds != null) {
+      for (var entry : thresholds.entrySet()) {
+        if (byType.getOrDefault(entry.getKey().toUpperCase(Locale.ROOT), 0) > entry.getValue()) {
+          return 1;
+        }
+      }
+    }
+    if (thresholdsBySeverity != null) {
+      for (var entry : thresholdsBySeverity.entrySet()) {
+        if (bySeverity.getOrDefault(entry.getKey().toUpperCase(Locale.ROOT), 0) > entry.getValue()) {
+          return 1;
+        }
+      }
+    }
+    return 0;
   }
 
   static RuleCatalog loadCatalog() {
@@ -749,7 +809,7 @@ public final class SonarAnalyzerCli implements Runnable {
     var value = current.get();
     if (!value.exists()) {
       throw new IllegalArgumentException(
-        "Current managed profile is missing: " + value.name() + ". Run `profile clear` or recreate the profile."
+        "Current profile is missing: " + value.name() + ". Run `profile clear` or recreate the profile."
       );
     }
     return value.path().toString();
