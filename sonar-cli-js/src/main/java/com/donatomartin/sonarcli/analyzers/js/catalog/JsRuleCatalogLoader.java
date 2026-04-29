@@ -85,6 +85,9 @@ public final class JsRuleCatalogLoader {
       }
       var description = loadTextResource("/org/sonar/l10n/javascript/rules/javascript/" + rawKey + ".html");
       var hook = instantiate(rawClass, EslintHook.class);
+      if (!hook.isEnabled()) {
+        continue;
+      }
       var languages = languagesFor(rawClass, metadata.compatibleLanguages);
       var runtimeRules = new ArrayList<JsRuntimeRule>();
       for (String language : languages) {
