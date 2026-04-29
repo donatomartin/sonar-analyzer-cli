@@ -31,7 +31,7 @@ class SonarAnalyzerCliTest {
     assertTrue(bash.contains("sonar-analyzer-cli Bash Completion"));
     assertTrue(bash.contains("profile"));
     assertTrue(bash.contains("completion"));
-    assertTrue(bash.contains("--from-profile"));
+    assertTrue(bash.contains("init"));
 
     var zsh = execute("completion", "--shell", "zsh");
     assertTrue(zsh.startsWith("#compdef sonar-analyzer-cli"));
@@ -39,10 +39,10 @@ class SonarAnalyzerCliTest {
   }
 
   @Test
-  void shouldSaveAndUseManagedProfilesFromTheCli() throws Exception {
+  void shouldInitAndUseManagedProfilesFromTheCli() throws Exception {
     System.setProperty(ManagedProfileStore.CONFIG_DIR_PROPERTY, tempDir.toString());
 
-    var exitCode = executeWithExitCode("profile", "save", "frontend", "--enable", "javascript:S3776", "--use");
+    var exitCode = executeWithExitCode("profile", "init", "frontend", "--use");
     assertEquals(0, exitCode);
     assertTrue(Files.isRegularFile(tempDir.resolve("profiles").resolve("frontend.yaml")));
     assertEquals("frontend", new ManagedProfileStore(tempDir).currentProfile().orElseThrow().name());

@@ -4,6 +4,7 @@ import com.donatomartin.sonarcli.core.model.RuleConfigFile;
 import com.donatomartin.sonarcli.core.util.RuleConfigSupport;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -23,7 +24,9 @@ class ManagedProfileStoreTest {
     var config = new RuleConfigFile(
       List.of("Sonar way"),
       List.of("typescript:S1186"),
-      List.of("css:S1128")
+      List.of("css:S1128"),
+      Map.of(),
+      Map.of()
     );
 
     store.save("frontend", config, false);

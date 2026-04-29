@@ -33,7 +33,9 @@ class ReportRendererTest {
         new IssueRecord("js", RuleFamily.JS, "S6564", "typescript:S6564", "src/example.ts", 1, 0, 1, 12, "Redundant type alias", "Major", "CODE_SMELL", List.of()),
         new IssueRecord("js", RuleFamily.JS, "S3776", "typescript:S3776", "src/example.ts", 3, 2, 3, 14, "Function is too complex", "Critical", "CODE_SMELL", List.of())
       ),
-      new ReportStats(1, Map.of("js-ts", 1), 2, 0, 25)
+      new ReportStats(1, Map.of("js-ts", 1), 2, 0, 25),
+      Map.of(),
+      Map.of()
     );
 
     Path output = tempDir.resolve("report.txt");
