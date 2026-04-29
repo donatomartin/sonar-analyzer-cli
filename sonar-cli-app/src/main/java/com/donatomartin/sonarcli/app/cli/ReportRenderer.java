@@ -14,6 +14,16 @@ import java.util.Map;
 
 public final class ReportRenderer {
 
+  // Preferred display order for issue types
+  private static final List<String> TYPE_ORDER = List.of(
+    "BUG", "VULNERABILITY", "SECURITY_HOTSPOT", "CODE_SMELL"
+  );
+
+  // Preferred display order for severities
+  private static final List<String> SEVERITY_ORDER = List.of(
+    "BLOCKER", "CRITICAL", "HIGH", "MAJOR", "MEDIUM", "MINOR", "LOW", "INFO"
+  );
+
   public enum Format {
     text,
     json
@@ -39,8 +49,10 @@ public final class ReportRenderer {
 
   private String renderText(AnalysisReport report, boolean colorEnabled) {
     var lines = new ArrayList<String>();
+    var hasThresholds = (report.thresholds() != null && !report.thresholds().isEmpty())
+      || (report.thresholdsBySeverity() != null && !report.thresholdsBySeverity().isEmpty());
 
-    lines.add(tabs(colorEnabled, report));
+    lines.add(tabs(colorEnabled, report, hasThresholds));
     lines.add("");
     lines.add(section("Summary", colorEnabled));
     lines.add(
@@ -96,7 +108,204 @@ public final class ReportRenderer {
       }
     }
 
+    lines.add("");
+    renderGate(report, colorEnabled, lines);
+
     return String.join(System.lineSeparator(), lines);
+  }
+
+  private static void renderGate(AnalysisReport report, boolean colorEnabled, List<String> lines) {
+    var thresholds = report.thresholds();
+    var thresholdsBySeverity = report.thresholdsBySeverity();
+    var hasTypeThresholds = thresholds != null && !thresholds.isEmpty();
+    var hasSeverityThresholds = thresholdsBySeverity != null && !thresholdsBySeverity.isEmpty();
+    var hasAnyThreshold = hasTypeThresholds || hasSeverityThresholds;
+
+    // Tally issues by type and severity
+    var byType = new LinkedHashMap<String, Integer>();
+    var bySeverity = new LinkedHashMap<String, Integer>();
+    for (IssueRecord issue : report.issues()) {
+      if (issue.type() != null && !issue.type().isBlank()) {
+        byType.merge(issue.type().toUpperCase(Locale.ROOT), 1, Integer::sum);
+      }
+      if (issue.severity() != null && !issue.severity().isBlank()) {
+        bySeverity.merge(issue.severity().toUpperCase(Locale.ROOT), 1, Integer::sum);
+      }
+    }
+
+    // Plain border strings (color applied separately — never use substring on ANSI strings)
+    var borderPlain = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    var innerDividerPlain = "──────────────────────────────────────────────────────";
+    var border = colorEnabled ? dim(true, borderPlain) : borderPlain;
+    var innerDivider = "  " + (colorEnabled ? dim(true, innerDividerPlain) : innerDividerPlain);
+
+    lines.add(border);
+    lines.add("  " + (colorEnabled ? bold(hasAnyThreshold ? "Quality Gate" : "Issue Breakdown") : (hasAnyThreshold ? "Quality Gate" : "Issue Breakdown")));
+    lines.add(border);
+
+    if (byType.isEmpty() && bySeverity.isEmpty() && !hasAnyThreshold) {
+      lines.add("  " + (colorEnabled ? green("✓  No issues found") : "No issues found"));
+      lines.add(border);
+      return;
+    }
+
+    int totalFailed = 0;
+
+    // ── By Type section ──────────────────────────────────────────
+    var displayTypes = orderedKeys(byType, hasTypeThresholds ? thresholds : Map.of(), TYPE_ORDER);
+    if (!displayTypes.isEmpty() || hasTypeThresholds) {
+      var subheading = "  " + (colorEnabled ? dim(true, "By Type") : "By Type");
+      lines.add(subheading);
+      if (hasTypeThresholds) {
+        var header = "  " + padRight("TYPE", 18) + "  " + padLeft("FOUND", 6) + "  " + padLeft("MAX", 6) + "  " + padRight("BAR", 10) + "  STATUS";
+        lines.add(colorEnabled ? dim(true, header) : header);
+      } else {
+        var header = "  " + padRight("TYPE", 18) + "  " + padLeft("FOUND", 6);
+        lines.add(colorEnabled ? dim(true, header) : header);
+      }
+      lines.add(innerDivider);
+      for (String type : displayTypes) {
+        var count = byType.getOrDefault(type, 0);
+        if (hasTypeThresholds) {
+          var allowed = thresholds.getOrDefault(type, -1);
+          var exceeded = allowed >= 0 && count > allowed;
+          if (exceeded) totalFailed++;
+          lines.add(renderThresholdRow(type, count, allowed, exceeded, colorEnabled));
+        } else {
+          lines.add(renderSimpleRow(type, count, colorEnabled, isCriticalType(type)));
+        }
+      }
+      lines.add(innerDivider);
+    }
+
+    // ── By Severity section ───────────────────────────────────────
+    var displaySeverities = orderedKeys(bySeverity, hasSeverityThresholds ? thresholdsBySeverity : Map.of(), SEVERITY_ORDER);
+    if (!displaySeverities.isEmpty() || hasSeverityThresholds) {
+      if (!displayTypes.isEmpty() || hasTypeThresholds) {
+        lines.add(""); // spacing between subsections
+      }
+      var subheading = "  " + (colorEnabled ? dim(true, "By Severity") : "By Severity");
+      lines.add(subheading);
+      if (hasSeverityThresholds) {
+        var header = "  " + padRight("SEVERITY", 18) + "  " + padLeft("FOUND", 6) + "  " + padLeft("MAX", 6) + "  " + padRight("BAR", 10) + "  STATUS";
+        lines.add(colorEnabled ? dim(true, header) : header);
+      } else {
+        var header = "  " + padRight("SEVERITY", 18) + "  " + padLeft("FOUND", 6);
+        lines.add(colorEnabled ? dim(true, header) : header);
+      }
+      lines.add(innerDivider);
+      for (String severity : displaySeverities) {
+        var count = bySeverity.getOrDefault(severity, 0);
+        if (hasSeverityThresholds) {
+          var allowed = thresholdsBySeverity.getOrDefault(severity, -1);
+          var exceeded = allowed >= 0 && count > allowed;
+          if (exceeded) totalFailed++;
+          lines.add(renderThresholdRow(severity, count, allowed, exceeded, colorEnabled));
+        } else {
+          lines.add(renderSimpleRow(severity, count, colorEnabled, isCriticalSeverity(severity)));
+        }
+      }
+      lines.add(innerDivider);
+    }
+
+    // ── Result footer ─────────────────────────────────────────────
+    if (hasAnyThreshold) {
+      int total = byType.values().stream().mapToInt(Integer::intValue).sum();
+      if (totalFailed == 0) {
+        lines.add("  Result: " + (colorEnabled ? green("✓  PASSED") : "✓  PASSED")
+          + "  ·  " + total + " issue" + (total == 1 ? "" : "s") + ", all within limits");
+      } else {
+        lines.add("  Result: " + (colorEnabled ? red("✗  FAILED") : "✗  FAILED")
+          + "  ·  " + totalFailed + " threshold" + (totalFailed == 1 ? "" : "s") + " exceeded");
+      }
+    } else {
+      int total = byType.values().stream().mapToInt(Integer::intValue).sum();
+      if (total == 0) {
+        lines.add("  " + (colorEnabled ? green("No issues") : "No issues"));
+      } else {
+        lines.add("  " + (colorEnabled ? yellow(total + " issue" + (total == 1 ? "" : "s") + " total") : total + " issue" + (total == 1 ? "" : "s") + " total"));
+      }
+    }
+
+    lines.add(border);
+  }
+
+  /** Returns keys in preferred order, appending any extras not in the order list. */
+  private static List<String> orderedKeys(Map<String, Integer> counts, Map<String, Integer> thresholds, List<String> preferredOrder) {
+    var result = new ArrayList<String>();
+    for (String key : preferredOrder) {
+      if (counts.containsKey(key) || thresholds.containsKey(key)) {
+        result.add(key);
+      }
+    }
+    for (String key : counts.keySet()) {
+      if (!result.contains(key)) result.add(key);
+    }
+    for (String key : thresholds.keySet()) {
+      if (!result.contains(key)) result.add(key);
+    }
+    return result;
+  }
+
+  private static String renderThresholdRow(String type, int count, int allowed, boolean exceeded, boolean colorEnabled) {
+    // Pad all values with plain strings FIRST, then apply color
+    var typePadded = padRight(type, 18);
+    var countPadded = padLeft(String.valueOf(count), 6);
+    var allowedPadded = allowed < 0 ? padLeft("—", 6) : padLeft(String.valueOf(allowed), 6);
+    var bar = renderBar(count, allowed, colorEnabled);
+    var statusPlain = exceeded ? "✗ FAIL" : "✓ ok";
+
+    if (!colorEnabled) {
+      return "  " + typePadded + "  " + countPadded + "  " + allowedPadded + "  " + bar + "  " + statusPlain;
+    }
+    var typeStr = exceeded ? bold(typePadded) : typePadded;
+    var countStr = exceeded ? red(countPadded) : (count == 0 ? dim(true, countPadded) : countPadded);
+    var status = exceeded ? red(statusPlain) : green(statusPlain);
+    return "  " + typeStr + "  " + countStr + "  " + allowedPadded + "  " + bar + "  " + status;
+  }
+
+  private static String renderSimpleRow(String label, int count, boolean colorEnabled, boolean critical) {
+    var labelPadded = padRight(label, 18);
+    var countPadded = padLeft(String.valueOf(count), 6);
+    if (!colorEnabled) {
+      return "  " + labelPadded + "  " + countPadded;
+    }
+    var countStr = count == 0
+      ? dim(true, countPadded)
+      : (critical ? red(countPadded) : yellow(countPadded));
+    return "  " + labelPadded + "  " + countStr;
+  }
+
+  private static String renderBar(int count, int allowed, boolean colorEnabled) {
+    if (allowed < 0) {
+      // No limit — return plain dashes (10 chars, no color so padRight works correctly)
+      return "──────────";
+    }
+    int bars = 10;
+    int filled;
+    if (allowed == 0) {
+      filled = count > 0 ? bars : 0;
+    } else {
+      filled = Math.min(bars, (int) Math.ceil((double) count / allowed * bars));
+    }
+    var exceeded = count > allowed;
+    var sb = new StringBuilder();
+    for (int i = 0; i < bars; i++) {
+      sb.append(i < filled ? "█" : "░");
+    }
+    var bar = sb.toString(); // always 10 chars — apply color AFTER so padRight(bar,10) works
+    if (!colorEnabled) {
+      return bar;
+    }
+    return exceeded ? red(bar) : (filled > bars * 0.7 ? yellow(bar) : green(bar));
+  }
+
+  private static boolean isCriticalType(String type) {
+    return "BUG".equals(type) || "VULNERABILITY".equals(type) || "SECURITY_HOTSPOT".equals(type);
+  }
+
+  private static boolean isCriticalSeverity(String severity) {
+    return "BLOCKER".equals(severity) || "CRITICAL".equals(severity) || "HIGH".equals(severity);
   }
 
   private static void renderIssuesByFile(List<IssueRecord> issues, boolean colorEnabled, List<String> lines) {
@@ -154,10 +363,13 @@ public final class ReportRenderer {
     }
   }
 
-  private static String tabs(boolean colorEnabled, AnalysisReport report) {
-    var tabs = List.of("Summary", "Files", "Rules", "Warnings");
+  private static String tabs(boolean colorEnabled, AnalysisReport report, boolean hasThresholds) {
+    var tabNames = new ArrayList<>(List.of("Summary", "Files", "Rules", "Warnings"));
+    if (hasThresholds) {
+      tabNames.add("Gate");
+    }
     var rendered = new ArrayList<String>();
-    for (String tab : tabs) {
+    for (String tab : tabNames) {
       rendered.add(colorEnabled ? cyan("[" + tab + "]") : "[" + tab + "]");
     }
     return String.join(" ", rendered) + "  " + dim(colorEnabled, report.engine() + " " + report.engineVersion());
