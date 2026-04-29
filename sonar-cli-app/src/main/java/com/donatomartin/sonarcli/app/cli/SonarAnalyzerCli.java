@@ -22,6 +22,7 @@ import java.io.PrintWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -255,11 +256,11 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
-  @Command(name = "profile", mixinStandardHelpOptions = true, description = "Manage saved local rule profiles", subcommands = {
+  @Command(name = "profile", mixinStandardHelpOptions = true, description = "Manage rule profiles stored in the config directory", subcommands = {
     ProfileListCommand.class,
     ProfileCurrentCommand.class,
     ProfileShowCommand.class,
-    ProfileSaveCommand.class,
+    ProfileInitCommand.class,
     ProfileUseCommand.class,
     ProfileClearCommand.class,
     ProfileDeleteCommand.class
@@ -271,7 +272,7 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
-  @Command(name = "list", mixinStandardHelpOptions = true, description = "List managed profiles stored in the user config directory")
+  @Command(name = "list", mixinStandardHelpOptions = true, description = "List profiles in the config directory")
   static final class ProfileListCommand implements Callable<Integer> {
 
     @Override
@@ -280,7 +281,9 @@ public final class SonarAnalyzerCli implements Runnable {
       var current = store.currentProfile().orElse(null);
       var profiles = store.listProfiles();
       var lines = new ArrayList<String>();
-      lines.add("Config dir: " + store.configDir());
+      lines.add("Profiles directory: " + store.profilesDir());
+      lines.add("  Drop a YAML file there to add a profile without any CLI command.");
+      lines.add("");
       if (current == null) {
         lines.add("Current: <none>");
       } else {
@@ -288,7 +291,7 @@ public final class SonarAnalyzerCli implements Runnable {
       }
       lines.add("");
       if (profiles.isEmpty()) {
-        lines.add("No managed profiles.");
+        lines.add("No profiles found. Run `profile init <name>` to create one.");
       } else {
         for (ManagedProfileStore.ManagedProfile profile : profiles) {
           var marker = current != null && current.name().equals(profile.name()) ? "*" : " ";
@@ -303,7 +306,7 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
-  @Command(name = "current", mixinStandardHelpOptions = true, description = "Show the current managed profile")
+  @Command(name = "current", mixinStandardHelpOptions = true, description = "Show the current profile")
   static final class ProfileCurrentCommand implements Callable<Integer> {
 
     @Override
@@ -311,7 +314,7 @@ public final class SonarAnalyzerCli implements Runnable {
       var current = profileStore().currentProfile();
       var lines = new ArrayList<String>();
       if (current.isEmpty()) {
-        lines.add("No current managed profile set.");
+        lines.add("No current profile set.");
       } else {
         var value = current.get();
         lines.add("Current profile: " + value.name());
@@ -323,10 +326,10 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
-  @Command(name = "show", mixinStandardHelpOptions = true, description = "Show one managed profile")
+  @Command(name = "show", mixinStandardHelpOptions = true, description = "Show one profile")
   static final class ProfileShowCommand implements Callable<Integer> {
 
-    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    @Parameters(index = "0", description = "Profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
     String profileName;
 
     @Override
@@ -345,112 +348,84 @@ public final class SonarAnalyzerCli implements Runnable {
     }
   }
 
-  @Command(name = "save", mixinStandardHelpOptions = true, description = "Create or update a managed profile")
-  static final class ProfileSaveCommand implements Callable<Integer> {
+  @Command(name = "init", mixinStandardHelpOptions = true, description = "Create a template profile YAML in the config directory")
+  static final class ProfileInitCommand implements Callable<Integer> {
 
-    @Parameters(index = "0", description = "Managed profile name")
+    @Parameters(index = "0", description = "Profile name")
     String profileName;
 
-    @Option(
-      names = "--from-profile",
-      description = "Base managed or packaged profile name",
-      completionCandidates = CliCompletionCandidates.ManagedAndPackagedProfileNames.class
-    )
-    String fromProfile;
-
-    @Option(names = "--from-file", description = "Base JSON/YAML rule file")
-    Path fromFile;
-
-    @Option(
-      names = "--enable",
-      split = ",",
-      description = "Enable one or more rules",
-      completionCandidates = CliCompletionCandidates.RuleSelectors.class
-    )
-    List<String> enable = new ArrayList<>();
-
-    @Option(
-      names = "--disable",
-      split = ",",
-      description = "Disable one or more rules",
-      completionCandidates = CliCompletionCandidates.RuleSelectors.class
-    )
-    List<String> disable = new ArrayList<>();
-
-    @Option(names = "--use", description = "Set this profile as the current managed profile after saving")
+    @Option(names = "--use", description = "Set this profile as the current profile after creating it")
     boolean use;
 
-    @Option(names = "--force", description = "Overwrite an existing managed profile")
+    @Option(names = "--force", description = "Overwrite an existing profile")
     boolean force;
 
     @Override
     public Integer call() throws Exception {
-      if (fromProfile != null && fromFile != null) {
-        throw new IllegalArgumentException("Use either --from-profile or --from-file, not both.");
-      }
-      var catalog = loadCatalog();
       var store = profileStore();
-      var config = buildManagedProfileConfig(catalog, store, fromProfile, fromFile, enable, disable);
-      var selectedRules = catalog.resolveSelection(config, allAnalyzerIds());
-      store.save(profileName, config, force);
+      Files.createDirectories(store.profilesDir());
+      var path = store.pathFor(profileName);
+      if (!force && Files.exists(path)) {
+        throw new IllegalArgumentException("Profile already exists: " + profileName + ". Use --force to overwrite it.");
+      }
+      Files.writeString(
+        path,
+        RuleConfigSupport.templateYaml(),
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE
+      );
       if (use) {
         store.use(profileName);
       }
-
       var lines = new ArrayList<String>();
-      lines.add("Saved managed profile: " + profileName);
-      lines.add("Path: " + store.pathFor(profileName));
+      lines.add("Created profile: " + profileName);
+      lines.add("Path: " + path);
       lines.add("Current: " + (use ? profileName : store.currentProfile().map(ManagedProfileStore.CurrentProfile::name).orElse("<unchanged>")));
-      lines.add(
-        "Rules: " + selectedRules.selectedRules().size() + " active across " + selectedRules.rulesByAnalyzer().size() + " analyzers"
-      );
-      if (!selectedRules.selectionWarnings().isEmpty()) {
-        lines.add("");
-        lines.add("Warnings:");
-        for (String warning : selectedRules.selectionWarnings()) {
-          lines.add("  - " + warning);
-        }
-      }
+      lines.add("");
+      lines.add("Edit the file to customize rules and thresholds, then run:");
+      lines.add("  profile use " + profileName + "  (set as active)");
+      lines.add("  analyze                       (run analysis)");
       REPORT_RENDERER.printRuleList(lines);
       return 0;
     }
   }
 
-  @Command(name = "use", mixinStandardHelpOptions = true, description = "Set the current managed profile")
+  @Command(name = "use", mixinStandardHelpOptions = true, description = "Set the current profile")
   static final class ProfileUseCommand implements Callable<Integer> {
 
-    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    @Parameters(index = "0", description = "Profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
     String profileName;
 
     @Override
     public Integer call() throws Exception {
       profileStore().use(profileName);
-      REPORT_RENDERER.printRuleList(List.of("Current managed profile: " + profileName));
+      REPORT_RENDERER.printRuleList(List.of("Current profile: " + profileName));
       return 0;
     }
   }
 
-  @Command(name = "clear", mixinStandardHelpOptions = true, description = "Clear the current managed profile")
+  @Command(name = "clear", mixinStandardHelpOptions = true, description = "Clear the current profile selection")
   static final class ProfileClearCommand implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
       profileStore().clearCurrent();
-      REPORT_RENDERER.printRuleList(List.of("Cleared current managed profile."));
+      REPORT_RENDERER.printRuleList(List.of("Cleared current profile."));
       return 0;
     }
   }
 
-  @Command(name = "delete", mixinStandardHelpOptions = true, description = "Delete one managed profile")
+  @Command(name = "delete", mixinStandardHelpOptions = true, description = "Delete one profile")
   static final class ProfileDeleteCommand implements Callable<Integer> {
 
-    @Parameters(index = "0", description = "Managed profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
+    @Parameters(index = "0", description = "Profile name", completionCandidates = CliCompletionCandidates.ManagedProfileNames.class)
     String profileName;
 
     @Override
     public Integer call() throws Exception {
       profileStore().delete(profileName);
-      REPORT_RENDERER.printRuleList(List.of("Deleted managed profile: " + profileName));
+      REPORT_RENDERER.printRuleList(List.of("Deleted profile: " + profileName));
       return 0;
     }
   }
@@ -791,65 +766,6 @@ public final class SonarAnalyzerCli implements Runnable {
 
   private static ManagedProfileStore profileStore() {
     return ManagedProfileStore.defaultStore();
-  }
-
-  private static RuleConfigFile buildManagedProfileConfig(
-    RuleCatalog catalog,
-    ManagedProfileStore store,
-    String fromProfile,
-    Path fromFile,
-    List<String> enable,
-    List<String> disable
-  ) throws IOException {
-    RuleConfigFile baseConfig;
-    if (fromFile != null) {
-      var absoluteFile = fromFile.toAbsolutePath().normalize();
-      if (!Files.isRegularFile(absoluteFile)) {
-        throw new IllegalArgumentException("Not a rules file: " + absoluteFile);
-      }
-      baseConfig = RuleConfigSupport.read(absoluteFile);
-    } else if (fromProfile != null && !fromProfile.isBlank()) {
-      var managedProfile = store.resolveManagedProfile(fromProfile);
-      if (managedProfile != null) {
-        baseConfig = RuleConfigSupport.read(managedProfile);
-      } else {
-        var profileName = fromProfile.trim();
-        catalog.resolveSelection(new RuleConfigFile(List.of(profileName), List.of(), List.of()), allAnalyzerIds());
-        baseConfig = new RuleConfigFile(List.of(profileName), List.of(), List.of());
-      }
-    } else {
-      baseConfig = new RuleConfigFile(List.of("Sonar way"), List.of(), List.of());
-    }
-    return mergeRuleConfig(baseConfig, enable, disable);
-  }
-
-  private static RuleConfigFile mergeRuleConfig(RuleConfigFile baseConfig, List<String> enable, List<String> disable) {
-    var normalized = RuleConfigSupport.normalize(baseConfig);
-    var enabled = new LinkedHashSet<>(normalized.enable());
-    var disabled = new LinkedHashSet<>(normalized.disable());
-
-    for (String token : enable) {
-      if (token == null || token.isBlank()) {
-        continue;
-      }
-      var normalizedToken = token.trim();
-      enabled.add(normalizedToken);
-      disabled.remove(normalizedToken);
-    }
-    for (String token : disable) {
-      if (token == null || token.isBlank()) {
-        continue;
-      }
-      var normalizedToken = token.trim();
-      disabled.add(normalizedToken);
-      enabled.remove(normalizedToken);
-    }
-
-    return new RuleConfigFile(
-      normalized.profiles(),
-      List.copyOf(enabled),
-      List.copyOf(disabled)
-    );
   }
 
   private static String renderCompletionScript(CompletionCommand.Shell shell, String commandName) {

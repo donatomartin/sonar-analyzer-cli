@@ -14,7 +14,7 @@ public class AnalysisOptionsMixin {
   @Option(names = "--output", description = "Write output to a file")
   Path output;
 
-  @Option(names = "--rules", description = "Managed profile name, packaged quality profile name, or JSON/YAML rule file")
+  @Option(names = "--profile", description = "Managed profile name, packaged quality profile name, or JSON/YAML rule file")
   String rulesProfileOrFile;
 
   @Option(

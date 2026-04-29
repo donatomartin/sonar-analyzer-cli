@@ -62,7 +62,10 @@ public final class ManagedProfileStore {
     try (Stream<Path> files = Files.list(profilesDir)) {
       return files
         .filter(Files::isRegularFile)
-        .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".yaml"))
+        .filter(path -> {
+          var name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+          return name.endsWith(".yaml") || name.endsWith(".yml");
+        })
         .map(path -> new ManagedProfile(stripExtension(path.getFileName().toString()), path.toAbsolutePath().normalize()))
         .sorted(Comparator.comparing(ManagedProfile::name, String.CASE_INSENSITIVE_ORDER))
         .toList();
