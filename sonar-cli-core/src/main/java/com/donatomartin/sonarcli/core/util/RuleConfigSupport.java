@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -26,7 +27,9 @@ public final class RuleConfigSupport {
       return new RuleConfigFile(
         normalizeList(coerceList(map.get("profiles"))),
         normalizeList(coerceList(map.get("enable"))),
-        normalizeList(coerceList(map.get("disable")))
+        normalizeList(coerceList(map.get("disable"))),
+        normalizeThresholds(map.get("thresholds")),
+        normalizeThresholds(map.get("thresholdsBySeverity"))
       );
     }
     var parsed = JsonSupport.GSON.fromJson(content, RuleConfigFile.class);
@@ -40,7 +43,9 @@ public final class RuleConfigSupport {
     return new RuleConfigFile(
       normalizeList(config.profiles()),
       normalizeList(config.enable()),
-      normalizeList(config.disable())
+      normalizeList(config.disable()),
+      normalizeThresholds(config.thresholds()),
+      normalizeThresholds(config.thresholdsBySeverity())
     );
   }
 
@@ -50,7 +55,33 @@ public final class RuleConfigSupport {
     appendList(builder, "profiles", normalized.profiles());
     appendList(builder, "enable", normalized.enable());
     appendList(builder, "disable", normalized.disable());
+    appendThresholds(builder, "thresholds", normalized.thresholds());
+    appendThresholds(builder, "thresholdsBySeverity", normalized.thresholdsBySeverity());
     return builder.toString();
+  }
+
+  public static String templateYaml() {
+    return String.join(System.lineSeparator(),
+      "profiles:",
+      "  - 'Sonar way'",
+      "enable: []",
+      "disable: []",
+      "",
+      "# Optional: maximum issues allowed per type (BUG, VULNERABILITY, CODE_SMELL, SECURITY_HOTSPOT).",
+      "# Exceeding any limit causes a non-zero exit code, blocking commits in tools like husky.",
+      "# thresholds:",
+      "#   BUG: 0",
+      "#   VULNERABILITY: 0",
+      "#   CODE_SMELL: 50",
+      "#   SECURITY_HOTSPOT: 0",
+      "",
+      "# Optional: maximum issues allowed per severity (BLOCKER, CRITICAL, MAJOR, MINOR, INFO).",
+      "# thresholdsBySeverity:",
+      "#   BLOCKER: 0",
+      "#   CRITICAL: 0",
+      "#   MAJOR: 20",
+      ""
+    );
   }
 
   private static void appendList(StringBuilder builder, String name, List<String> values) {
@@ -62,6 +93,16 @@ public final class RuleConfigSupport {
     builder.append(System.lineSeparator());
     for (String value : values) {
       builder.append("  - ").append(quoteYaml(value)).append(System.lineSeparator());
+    }
+  }
+
+  private static void appendThresholds(StringBuilder builder, String key, Map<String, Integer> thresholds) {
+    if (thresholds == null || thresholds.isEmpty()) {
+      return;
+    }
+    builder.append(key).append(":").append(System.lineSeparator());
+    for (Map.Entry<String, Integer> entry : thresholds.entrySet()) {
+      builder.append("  ").append(entry.getKey()).append(": ").append(entry.getValue()).append(System.lineSeparator());
     }
   }
 
@@ -91,5 +132,33 @@ public final class RuleConfigSupport {
       return List.of(string);
     }
     return List.of(String.valueOf(value));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Integer> normalizeThresholds(Object raw) {
+    if (raw == null) {
+      return Map.of();
+    }
+    Map<String, Integer> result = new LinkedHashMap<>();
+    if (raw instanceof Map<?, ?> map) {
+      for (Map.Entry<?, ?> entry : map.entrySet()) {
+        if (entry.getKey() == null || entry.getValue() == null) {
+          continue;
+        }
+        var key = String.valueOf(entry.getKey()).trim().toUpperCase(Locale.ROOT);
+        if (key.isBlank()) {
+          continue;
+        }
+        try {
+          var value = Integer.parseInt(String.valueOf(entry.getValue()).trim());
+          if (value >= 0) {
+            result.put(key, value);
+          }
+        } catch (NumberFormatException ignored) {
+          // skip invalid entries
+        }
+      }
+    }
+    return Map.copyOf(result);
   }
 }

@@ -87,7 +87,7 @@ public final class RuleCatalog {
       return resolveSelection(RuleConfigSupport.read(candidatePath), enableTokens, disableTokens, analyzerIds);
     }
     return resolveSelection(
-      new RuleConfigFile(List.of(rulesProfileOrFile), List.of(), List.of()),
+      new RuleConfigFile(List.of(rulesProfileOrFile), List.of(), List.of(), Map.of(), Map.of()),
       enableTokens,
       disableTokens,
       analyzerIds

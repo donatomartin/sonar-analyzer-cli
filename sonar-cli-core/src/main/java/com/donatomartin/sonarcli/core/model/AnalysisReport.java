@@ -12,5 +12,7 @@ public record AnalysisReport(
   List<String> activeRules,
   List<String> warnings,
   List<IssueRecord> issues,
-  ReportStats stats
+  ReportStats stats,
+  Map<String, Integer> thresholds,
+  Map<String, Integer> thresholdsBySeverity
 ) {}
